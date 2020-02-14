@@ -1,3 +1,9 @@
+"""
+    Decision theory: Experiment for FDR control
+    Annealed Important Sampling scripts.
+    If you experiment CUDA OOM issues, just decrease the value of `n_post_samples`
+"""
+
 import time
 import os
 
@@ -65,7 +71,7 @@ N_GENES = DATASET.nb_genes
 # )
 # print("Training using defensive sampling with counts: ", counts)
 
-# Option 1: Baseline model
+# Option 2: Baseline model
 # --------------------------------------
 mdl = VAE(n_input=N_GENES, prevent_library_saturation=False, n_latent=10,)
 PATH = "baseline.pt"
@@ -92,8 +98,13 @@ if not os.path.exists(PATH):
 post = trainer.create_posterior(
     model=mdl, gene_dataset=DATASET, indices=SAMPLE_IDX
 ).sequential(batch_size=2)
-n_post_samples = 100
+n_post_samples = 50
 zs, logws = ais_trajectory(model=mdl, loader=post, n_sample=n_post_samples)
+
+cubo = 0.5 * torch.logsumexp(2 * logws, dim=0) - np.log(n_post_samples)
+# query_execution_time = time.time() - start
+
+iwelbo = torch.logsumexp(logws, dim=0) - np.log(n_post_samples)
 _, khats = psislw(logws.T)
 
 # Mus
@@ -104,7 +115,6 @@ decision_rule_tpr10 = np.zeros(N_PICKS)
 fdr_gt = np.zeros((N_GENES, N_PICKS))
 pe_fdr = np.zeros((N_GENES, N_PICKS))
 n_post_samples = 50
-# n_post_samples = 100
 
 
 for ipick in range(N_PICKS):
@@ -172,6 +182,8 @@ for ipick in range(N_PICKS):
 
 res = {
     "khat_10000": khats,
+    "cubo": cubo,
+    "iwelbo": iwelbo,
     "query_execution_time": query_execution_time,
     "fdr_controlled_fdr10": decision_rule_fdr10,
     "fdr_controlled_tpr10": decision_rule_tpr10,

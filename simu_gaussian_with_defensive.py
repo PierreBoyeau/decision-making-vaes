@@ -1,3 +1,8 @@
+"""
+    Decision theory: Experiment for pPCA experiment
+"""
+
+
 import time
 
 import matplotlib.pyplot as plt

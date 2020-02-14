@@ -1,3 +1,8 @@
+"""
+    Decision theory: Experiment for pPCA experiment
+    Annealed Important Sampling scripts.
+"""
+
 import time
 
 import matplotlib.pyplot as plt
