@@ -7,6 +7,7 @@ from .gaussian_inference_defensive import (
     GaussianDefensivePosterior,
     GaussianDefensiveTrainer,
 )
+
 __all__ = [
     "Trainer",
     "Posterior",

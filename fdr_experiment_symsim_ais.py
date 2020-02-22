@@ -141,7 +141,10 @@ for ipick in range(N_PICKS):
     with torch.no_grad():
         log_h_a = (
             mdl.decoder(
-                mdl.dispersion, z_a.cuda(), torch.ones(len(z_a), 10, 1, device="cuda"), None
+                mdl.dispersion,
+                z_a.cuda(),
+                torch.ones(len(z_a), 10, 1, device="cuda"),
+                None,
             )[0]
             .log2()
             .cpu()
@@ -149,7 +152,10 @@ for ipick in range(N_PICKS):
         )
         log_h_b = (
             mdl.decoder(
-                mdl.dispersion, z_b.cuda(), torch.ones(len(z_b), 10, 1, device="cuda"), None
+                mdl.dispersion,
+                z_b.cuda(),
+                torch.ones(len(z_b), 10, 1, device="cuda"),
+                None,
             )[0]
             .log2()
             .cpu()

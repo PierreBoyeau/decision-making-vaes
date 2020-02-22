@@ -237,7 +237,9 @@ if __name__ == "__main__":
                 multi_encoder_keys = (
                     ["default"] if loss_wvar != "defensive" else ["CUBO", "EUBO"]
                 )
-                encoder_eval_name = "default" if loss_wvar != "defensive" else "defensive"
+                encoder_eval_name = (
+                    "default" if loss_wvar != "defensive" else "defensive"
+                )
 
                 mdl = VAE(
                     n_input=N_GENES,
@@ -319,7 +321,9 @@ if __name__ == "__main__":
                 # Using 1000 samples
                 log_ratios = []
                 n_samples_total = 1e4
-                n_samples_per_pass = 25 if encoder_eval_name == "default" else counts.sum()
+                n_samples_per_pass = (
+                    25 if encoder_eval_name == "default" else counts.sum()
+                )
                 n_iter = int(n_samples_total / n_samples_per_pass)
                 for _ in tqdm(range(n_iter)):
                     with torch.no_grad():
@@ -376,7 +380,9 @@ if __name__ == "__main__":
                     y_pred_is = y_pred_is.numpy()
 
                     true_fdr_arr = true_fdr(y_true=IS_SIGNIFICANT_DE, y_pred=y_pred_is)
-                    pe_fdr_arr, y_decision_rule = posterior_expected_fdr(y_pred=y_pred_is)
+                    pe_fdr_arr, y_decision_rule = posterior_expected_fdr(
+                        y_pred=y_pred_is
+                    )
                     # Fdr related
                     fdr_gt[:, ipick] = true_fdr_arr
                     pe_fdr[:, ipick] = pe_fdr_arr
@@ -385,7 +391,9 @@ if __name__ == "__main__":
                     l1_errs[ipick] = np.linalg.norm(true_fdr_arr - pe_fdr_arr, ord=1)
 
                     # Overall classification
-                    m_ap_vals[ipick] = average_precision_score(IS_SIGNIFICANT_DE, y_pred_is)
+                    m_ap_vals[ipick] = average_precision_score(
+                        IS_SIGNIFICANT_DE, y_pred_is
+                    )
                     auc_vals[ipick] = auc(IS_SIGNIFICANT_DE, y_pred_is)
 
                     # Decision rule related
@@ -445,7 +453,7 @@ if __name__ == "__main__":
                 "fdr_controlled_fdr": np.array(fdr_controlled_fdr),
                 "fdr_controlled_tpr": np.array(fdr_controlled_tpr),
                 "fdr_controlled_fdr10": np.array(fdr_controlled_fdr10),
-                "fdr_controlled_tpr10": np.array(fdr_controlled_tpr10),        
+                "fdr_controlled_tpr10": np.array(fdr_controlled_tpr10),
             }
 
             print(res)
