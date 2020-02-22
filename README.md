@@ -2,7 +2,9 @@
 
 ## Install package
 
-Install
+1. Install python 3.7 along with pytorch.
+
+1. Install `sbVAE`
 
 ```bash
 git clone https://github.com/PierreBoyeau/sbVAE.git
@@ -10,7 +12,7 @@ cd sbVAE
 python setup.py install
 ```
 
-Manual download of the synthetic scRNA dataset
+1. Manual download of the synthetic scRNA dataset
 
 ```bash
 cd sbVAE
