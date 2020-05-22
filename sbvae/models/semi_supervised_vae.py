@@ -1,6 +1,6 @@
 import logging
-
 import numpy as np
+import pandas as pd
 import torch
 from torch import nn
 from torch.distributions import Bernoulli, Categorical, Normal
@@ -10,6 +10,9 @@ from sbvae.models.regular_modules import (
     ClassifierA,
     DecoderA,
     EncoderA,
+    EncoderAStudent,
+    EncoderB,
+    EncoderBStudent,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,14 +31,23 @@ class SemiSupervisedVAE(nn.Module):
         n_latent: int = 10,
         n_layers: int = 1,
         dropout_rate: float = 0.1,
-        y_prior=None,
+        y_prior: torch.Tensor = None,
         classifier_parameters: dict = dict(),
-        prevent_saturation: bool = False,
-        iaf_t=0,
-        do_batch_norm=False,
-        multi_encoder_keys=["default"],
-        use_classifier=False,
+        do_batch_norm: bool = False,
+        multi_encoder_keys: list = ["default"],
+        use_classifier: bool = False,
+        encoder_z1: nn.Module = None,
+        encoder_z2_z1: nn.Module = None,
+        vdist_map=None,
     ):
+        if vdist_map is None:
+            vdist_map = dict(
+                REVKL="gaussian",
+                CUBO="gaussian",
+                ELBO="gaussian",
+                IWELBO="gaussian",
+                default="gaussian",
+            )
         # TODO: change architecture so that it match something existing
         super().__init__()
 
@@ -54,33 +66,43 @@ class SemiSupervisedVAE(nn.Module):
             }
         )
 
-        self.encoder_z1 = nn.ModuleDict(
-            {
-                key: EncoderA(
-                    # n_input=n_input + n_labels,
-                    n_input=n_input,
-                    n_output=n_latent,
-                    n_hidden=n_hidden,
-                    dropout_rate=dropout_rate,
-                    do_batch_norm=do_batch_norm,
-                )
-                for key in multi_encoder_keys
-            }
-        )
+        if encoder_z1 is None:
+            z1_map = dict(gaussian=EncoderB, student=EncoderBStudent,)
+            self.encoder_z1 = nn.ModuleDict(
+                {
+                    # key: EncoderA(
+                    # key: EncoderB(
+                    key: z1_map[vdist_map[key]](
+                        n_input=n_input,
+                        n_output=n_latent,
+                        n_hidden=n_hidden,
+                        dropout_rate=dropout_rate,
+                        do_batch_norm=do_batch_norm,
+                    )
+                    for key in multi_encoder_keys
+                }
+            )
+        else:
+            self.encoder_z1 = encoder_z1
 
         # q(z_2 \mid z_1, c)
-        self.encoder_z2_z1 = nn.ModuleDict(
-            {
-                key: EncoderA(
-                    n_input=n_latent + n_labels,
-                    n_output=n_latent,
-                    n_hidden=n_hidden,
-                    dropout_rate=dropout_rate,
-                    do_batch_norm=do_batch_norm,
-                )
-                for key in multi_encoder_keys
-            }
-        )
+        if encoder_z2_z1 is None:
+            z2_map = dict(gaussian=EncoderA, student=EncoderAStudent,)
+            self.encoder_z2_z1 = nn.ModuleDict(
+                {
+                    # key: EncoderA(
+                    key: z2_map[vdist_map[key]](
+                        n_input=n_latent + n_labels,
+                        n_output=n_latent,
+                        n_hidden=n_hidden,
+                        dropout_rate=dropout_rate,
+                        do_batch_norm=do_batch_norm,
+                    )
+                    for key in multi_encoder_keys
+                }
+            )
+        else:
+            self.encoder_z2_z1 = encoder_z2_z1
 
         self.decoder_z1_z2 = DecoderA(
             n_input=n_latent + n_labels, n_output=n_latent, n_hidden=n_hidden
@@ -113,24 +135,180 @@ class SemiSupervisedVAE(nn.Module):
         self.all_params = filter(lambda p: p.requires_grad, list(self.parameters()))
         self.use_classifier = use_classifier
 
-    def classify(self, x, n_samples=1, encoder_key="default"):
+    def classify(
+        self,
+        x,
+        n_samples=1,
+        mode="plugin",
+        counts: pd.Series = None,
+        encoder_key="default",
+        outs=None,
+    ):
         # n_cat = self.n_labels
         # n_batch = len(x)
         # inp = torch.cat((x, torch.zeros(n_batch, n_cat, device=x.device)), dim=-1)
-
-        out = self.inference(x, n_samples=n_samples, encoder_key=encoder_key)
-        w_y = out["qc_z1_all_probas"].squeeze()
-
+        if outs is None:
+            outs = self.inference(
+                x, n_samples=n_samples, encoder_key=encoder_key, counts=counts
+            )
+        if mode == "plugin":
+            # w_y = out["qc_z1_all_probas"].squeeze()
+            w_y = outs["log_qc_z1"].exp().mean(1).transpose(-1, -2)
+        elif mode == "is":
+            if counts is None:
+                log_generative = (
+                    outs["log_pc"]
+                    + outs["log_pz2"]
+                    + outs["log_pz1_z2"]
+                    + outs["log_px_z"]
+                )
+                log_predictive = (
+                    outs["log_qz1_x"] + outs["log_qz2_z1"] + outs["log_qc_z1"]
+                )
+                log_qc_z = outs["log_qc_z1"]
+                log_w = log_generative - log_predictive
+            else:
+                log_qc_z = outs["log_qc_z1"]
+                log_w = outs["log_ratio"]
+            log_wtilde = nn.LogSoftmax(1)(log_w)
+            log_pc1_x = log_qc_z + log_wtilde
+            log_pc1_x = torch.logsumexp(log_pc1_x, 1)
+            w_y = nn.Softmax(dim=0)(log_pc1_x).transpose(-1, -2)
+        else:
+            raise ValueError("Mode {} not recognize".format(mode))
         # inp = x
         # q_z1 = self.encoder_z1(inp, n_samples=n_samples)
         # z = q_z1["latent"]
         # w_y = self.classifier(z)
         return w_y
 
+    def update_q(
+        self, classifier: nn.Module, encoder_z1: nn.Module, encoder_z2_z1: nn.Module,
+    ):
+        logging.info("UPDATING ENCODERS ... ONLY MAKES SENSE WHEN USING EVAL ENCODER!")
+        self.classifier = classifier
+        self.encoder_z1 = encoder_z1
+        self.encoder_z2_z1 = encoder_z2_z1
+
     def get_latents(self, x, y=None):
         pass
 
-    def inference_defensive_sampling(self, x, y, counts):
+    # def inference_defensive_sampling(self, x, y, counts):
+    #     n_samples_total = counts.sum()
+    #     n_batch, _ = x.shape
+    #     n_latent = self.n_latent
+    #     n_labels = self.n_labels
+    #     sum_key = "sum_supervised" if y is not None else "sum_unsupervised"
+
+    #     # z sampling
+    #     ct = counts[0]
+
+    #     if ct >= 1:
+    #         post_cubo = self.inference(x, n_samples=ct, encoder_key="CUBO")
+    #         z_cubo = (
+    #             post_cubo["z1"]
+    #             .view(1, counts[0], n_batch, n_latent)
+    #             .expand(n_labels, counts[0], n_batch, n_latent)
+    #         )
+    #         u_cubo = post_cubo["z2"]
+    #         ys_cubo = post_cubo["ys"]
+    #     else:
+    #         z_cubo = torch.tensor([], device="cuda")
+    #         u_cubo = torch.tensor([], device="cuda")
+    #         ys_cubo = torch.tensor([], device="cuda")
+
+    #     ct = counts[1]
+    #     if ct >= 1:
+    #         post_eubo = self.inference(x, n_samples=ct, encoder_key="EUBO")
+    #         z_eubo = (
+    #             post_eubo["z1"]
+    #             .view(1, counts[1], n_batch, n_latent)
+    #             .expand(n_labels, counts[1], n_batch, n_latent)
+    #         )
+    #         u_eubo = post_eubo["z2"]
+    #         ys_eubo = post_eubo["ys"]
+    #     else:
+    #         z_eubo = torch.tensor([], device="cuda")
+    #         u_eubo = torch.tensor([], device="cuda")
+    #         ys_eubo = torch.tensor([], device="cuda")
+    #     # Sampling prior
+    #     ct = counts[2]
+    #     if ct >= 1:
+    #         latents_prior = self.latent_prior_sample(n_batch=n_batch, n_samples=ct)
+
+    #         z1_prior = latents_prior["z1"]
+    #         z2_prior = latents_prior["z2"]
+    #         ys_prior = latents_prior["ys"]
+    #     else:
+    #         z1_prior = torch.tensor([], device="cuda")
+    #         z2_prior = torch.tensor([], device="cuda")
+    #         ys_prior = torch.tensor([], device="cuda")
+
+    #     # Concatenating latent variables
+    #     z_all = torch.cat([z_cubo, z_eubo, z1_prior], dim=1)
+    #     u_all = torch.cat([u_cubo, u_eubo, z2_prior], dim=1)
+    #     y_all = torch.cat([ys_cubo, ys_eubo, ys_prior], dim=1)
+
+    #     log_p_alpha = (1.0 * counts / counts.sum()).log()
+    #     log_p_alpha = log_p_alpha
+    #     counts = counts
+    #     distribs_all = ["CUBO", "EUBO", "PRIOR"]
+
+    #     log_contribs = []
+    #     classifier_contribs = []
+    #     for count, encoder_key, log_p_a in zip(counts, distribs_all, log_p_alpha):
+    #         if encoder_key == "PRIOR":
+    #             res = self.latent_prior_log_proba(z1=z_all, z2=u_all, y=y_all)
+    #             log_proba_c = res["log_pc"]
+    #             log_proba_prior = res["sum_unsupervised"]
+    #         else:
+    #             res = self.variational_log_proba(
+    #                 z1=z_all, z2=u_all, y=y_all, x=x, encoder_key=encoder_key
+    #             )
+    #             log_proba_c = res["log_qc_z1"]
+    #         if count >= 1:
+    #             log_contribs.append(res[sum_key].unsqueeze(-1) + log_p_a)
+    #             classifier_contribs.append(log_proba_c.unsqueeze(-1) + log_p_a)
+
+    #     log_contribs = torch.cat(log_contribs, dim=-1)
+    #     sum_log_q = torch.logsumexp(log_contribs, dim=-1)
+    #     classifier_contribs = torch.cat(classifier_contribs, dim=-1)
+    #     log_qc_z1 = torch.logsumexp(classifier_contribs, dim=-1)
+    #     # n_cat, n_samples, n_batch
+    #     qc_z1 = log_qc_z1.exp()
+    #     qc_z1_all_probas = log_qc_z1.exp().permute(1, 2, 0)
+    #     # Decoder part
+    #     px_z_loc = self.x_decoder(z_all)
+    #     log_px_z = Bernoulli(px_z_loc).log_prob(x).sum(-1)
+
+    #     # Log ratio contruction
+    #     log_ratio = log_px_z + log_proba_prior - sum_log_q
+    #     # Shape n_cat, n_samples, n_batch
+    #     if y is not None:
+    #         one_hot = torch.cuda.FloatTensor(n_batch, n_labels).zero_()
+    #         mask = (
+    #             one_hot.scatter_(1, y.view(-1, 1), 1)
+    #             .T.view(n_labels, 1, n_batch)
+    #             .expand(n_labels, n_samples_total, n_batch)
+    #         )
+    #         log_ratio = (log_ratio * mask).sum(0)
+    #         sum_log_q = (sum_log_q * mask).sum(0)
+    #         log_px_z = (log_px_z * mask).sum(0)
+    #         log_qc_z1 = (log_qc_z1 * mask).sum(0)
+    #         qc_z1 = (qc_z1 * mask).sum(0)
+
+    #     return dict(
+    #         log_px_z=log_px_z,
+    #         sum_log_q=sum_log_q,
+    #         log_ratio=log_ratio,
+    #         log_qc_z1=log_qc_z1,
+    #         qc_z1=qc_z1,
+    #         qc_z1_all_probas=qc_z1_all_probas,
+    #         z1=z_all,
+    #         z2=u_all,
+    #     )
+
+    def inference_defensive_sampling(self, x, y, counts: pd.Series):
         n_samples_total = counts.sum()
         n_batch, _ = x.shape
         n_latent = self.n_latent
@@ -138,65 +316,60 @@ class SemiSupervisedVAE(nn.Module):
         sum_key = "sum_supervised" if y is not None else "sum_unsupervised"
 
         # z sampling
-        ct = counts[0]
-        if ct >= 1:
-            post_cubo = self.inference(x, n_samples=ct, encoder_key="CUBO")
-            z_cubo = (
-                post_cubo["z1"]
-                .view(1, counts[0], n_batch, n_latent)
-                .expand(n_labels, counts[0], n_batch, n_latent)
-            )
-            u_cubo = post_cubo["z2"]
-            ys_cubo = post_cubo["ys"]
-        else:
-            z_cubo = torch.tensor([], device="cuda")
-            u_cubo = torch.tensor([], device="cuda")
-            ys_cubo = torch.tensor([], device="cuda")
+        encoder_keys = counts.keys()
+        z_all = []
+        u_all = []
+        y_all = []
+        for key in encoder_keys:
+            ct = counts[key]
+            if key == "prior":
+                if ct >= 1:
+                    latents_prior = self.latent_prior_sample(
+                        n_batch=n_batch, n_samples=ct
+                    )
 
-        ct = counts[1]
-        if ct >= 1:
-            post_eubo = self.inference(x, n_samples=ct, encoder_key="EUBO")
-            z_eubo = (
-                post_eubo["z1"]
-                .view(1, counts[1], n_batch, n_latent)
-                .expand(n_labels, counts[1], n_batch, n_latent)
-            )
-            u_eubo = post_eubo["z2"]
-            ys_eubo = post_eubo["ys"]
-        else:
-            z_eubo = torch.tensor([], device="cuda")
-            u_eubo = torch.tensor([], device="cuda")
-            ys_eubo = torch.tensor([], device="cuda")
-        # Sampling prior
-        ct = counts[2]
-        if ct >= 1:
-            latents_prior = self.latent_prior_sample(n_batch=n_batch, n_samples=ct)
+                    _z = latents_prior["z1"]
+                    _u = latents_prior["z2"]
+                    _ys = latents_prior["ys"]
+                else:
+                    _z = torch.tensor([], device="cuda")
+                    _u = torch.tensor([], device="cuda")
+                    _ys = torch.tensor([], device="cuda")
+            else:
+                _post = self.inference(x, n_samples=ct, encoder_key=key)
+                if ct >= 1:
+                    _z = (
+                        _post["z1"]
+                        .view(1, ct, n_batch, n_latent)
+                        .expand(n_labels, ct, n_batch, n_latent)
+                    )
+                    _u = _post["z2"]
+                    _ys = _post["ys"]
+                else:
+                    _z = torch.tensor([], device="cuda")
+                    _u = torch.tensor([], device="cuda")
+                    _ys = torch.tensor([], device="cuda")
+            z_all.append(_z)
+            u_all.append(_u)
+            y_all.append(_ys)
 
-            z1_prior = latents_prior["z1"]
-            z2_prior = latents_prior["z2"]
-            ys_prior = latents_prior["ys"]
-        else:
-            z1_prior = torch.tensor([], device="cuda")
-            z2_prior = torch.tensor([], device="cuda")
-            ys_prior = torch.tensor([], device="cuda")
+        z_all = torch.cat(z_all, dim=1)
+        u_all = torch.cat(u_all, dim=1)
+        y_all = torch.cat(y_all, dim=1)
 
-        # Concatenating latent variables
-        z_all = torch.cat([z_cubo, z_eubo, z1_prior], dim=1)
-        u_all = torch.cat([u_cubo, u_eubo, z2_prior], dim=1)
-        y_all = torch.cat([ys_cubo, ys_eubo, ys_prior], dim=1)
-
-        log_p_alpha = (1.0 * counts / counts.sum()).log()
-        log_p_alpha = log_p_alpha
-        counts = counts
-        distribs_all = ["CUBO", "EUBO", "PRIOR"]
+        p_alpha = 1.0 * counts / counts.sum()
+        log_p_alpha = p_alpha.apply(np.log)
 
         log_contribs = []
         classifier_contribs = []
-        for count, encoder_key, log_p_a in zip(counts, distribs_all, log_p_alpha):
-            if encoder_key == "PRIOR":
-                res = self.latent_prior_log_proba(z1=z_all, z2=u_all, y=y_all)
-                log_proba_c = res["log_pc"]
-                log_proba_prior = res["sum_unsupervised"]
+        res_prior = self.latent_prior_log_proba(z1=z_all, z2=u_all, y=y_all)
+        log_proba_c_prior = res_prior["log_pc"]
+        log_proba_prior = res_prior["sum_unsupervised"]
+        for encoder_key in encoder_keys:
+            count = counts[encoder_key]
+            log_p_a = log_p_alpha[encoder_key]
+            if encoder_key == "prior":
+                log_proba_c = log_proba_c_prior
             else:
                 res = self.variational_log_proba(
                     z1=z_all, z2=u_all, y=y_all, x=x, encoder_key=encoder_key
@@ -240,6 +413,9 @@ class SemiSupervisedVAE(nn.Module):
             log_qc_z1=log_qc_z1,
             qc_z1=qc_z1,
             qc_z1_all_probas=qc_z1_all_probas,
+            log_pc=res_prior["log_pc"],
+            log_pz1_z2=res_prior["log_pz1_z2"],
+            log_pz2=res_prior["log_pz2"],
             z1=z_all,
             z2=u_all,
         )
@@ -327,26 +503,29 @@ class SemiSupervisedVAE(nn.Module):
             log_q
             (n_categories, n_is, n_batch)
         """
-        if encoder_key == "defensive":
+        if counts is not None:
             return self.inference_defensive_sampling(x=x, y=y, counts=counts)
-
-        n_batch = len(x)
         n_cat = self.n_labels
-
+        n_batch = len(x)
+        # C
         if y is None:
             # deal with the case that the latent factorization is not the same in M1 and M2
             ys = (
-                torch.eye(n_cat, device=x.device)
+                torch.eye(n_cat, device="cuda")
                 .view(n_cat, 1, 1, n_cat)
                 .expand(n_cat, n_samples, n_batch, n_cat)
             )
-            # inp = torch.cat((x, torch.zeros(n_batch, n_cat, device=x.device)), dim=-1)
+            y_int = ys.argmax(dim=-1)
         else:
             ys = torch.cuda.FloatTensor(n_batch, n_cat)
             ys.zero_()
             ys.scatter_(1, y.view(-1, 1), 1)
             ys = ys.view(1, n_batch, n_cat).expand(n_samples, n_batch, n_cat)
-            # inp = torch.cat((x, ys[0, :]), dim=-1)
+            y_int = y
+        log_pc = self.y_prior.log_prob(y_int)
+        pc = log_pc.exp()
+
+        # Z | X
         inp = x
         q_z1 = self.encoder_z1[encoder_key](
             inp, n_samples=n_samples, reparam=reparam, squeeze=False
@@ -356,43 +535,43 @@ class SemiSupervisedVAE(nn.Module):
         qz1_v = q_z1["q_v"]
         z1 = q_z1["latent"]
         assert z1.dim() == 3
-
-        log_qz1_x = Normal(qz1_m, qz1_v.sqrt()).log_prob(z1).sum(-1)
-
-        # Broadcast labels if necessary
+        # log_qz1_x = Normal(qz1_m, qz1_v.sqrt()).log_prob(z1).sum(-1)
+        log_qz1_x = q_z1["dist"].log_prob(z1)
+        dfs = q_z1.get("df", None)
+        if q_z1["sum_last"]:
+            log_qz1_x = log_qz1_x.sum(-1)
         if y is None:
             n_latent = z1.shape[-1]
             z1s = z1.view(1, n_samples, n_batch, n_latent).expand(
                 n_cat, n_samples, n_batch, n_latent
             )
-            y_int = ys.argmax(dim=-1)
+        else:
+            z1s = z1
+        torch.cuda.synchronize()
 
-            # Dealing with qc
+        #  C | Z
+        # Broadcast labels if necessary
+        if y is None:
             qc_z1 = self.classifier[encoder_key](z1).permute(2, 0, 1)
 
         else:
-            z1s = z1
-            y_int = y
-
-            # Dealing with qc
             qc_z1 = self.classifier[encoder_key](z1)[ys.bool()].view(n_samples, n_batch)
-
             # qc_z1_check = (self.classifier(z1) * ys.byte()).max(-1).values
             # assert (qc_z1_check == qc_z1).all()
 
         qc_z1_all_probas = self.classifier[encoder_key](z1)
         log_qc_z1 = qc_z1.log()
 
-        log_pc = self.y_prior.log_prob(y_int)
-        pc = log_pc.exp()
-
+        # U | Z1, C
         z1_y = torch.cat([z1s, ys], dim=-1)
         q_z2_z1 = self.encoder_z2_z1[encoder_key](z1_y, n_samples=1, reparam=reparam)
         z2 = q_z2_z1["latent"]
         qz2_z1_m = q_z2_z1["q_m"]
         qz2_z1_v = q_z2_z1["q_v"]
-        log_qz2_z1 = Normal(q_z2_z1["q_m"], q_z2_z1["q_v"].sqrt()).log_prob(z2).sum(-1)
-
+        # log_qz2_z1 = Normal(q_z2_z1["q_m"], q_z2_z1["q_v"].sqrt()).log_prob(z2).sum(-1)
+        log_qz2_z1 = q_z2_z1["dist"].log_prob(z2)
+        if q_z2_z1["sum_last"]:
+            log_qz2_z1 = log_qz2_z1.sum(-1)
         z2_y = torch.cat([z2, ys], dim=-1)
         pz1_z2m, pz1_z2_v = self.decoder_z1_z2(z2_y)
         log_pz1_z2 = Normal(pz1_z2m, pz1_z2_v.sqrt()).log_prob(z1).sum(-1)
@@ -401,7 +580,6 @@ class SemiSupervisedVAE(nn.Module):
 
         px_z_loc = self.x_decoder(z1)
         log_px_z = Bernoulli(px_z_loc).log_prob(x).sum(-1)
-
         generative_density = log_pz2 + log_pc + log_pz1_z2 + log_px_z
         variational_density = log_qz1_x + log_qz2_z1
         log_ratio = generative_density - variational_density
@@ -430,7 +608,9 @@ class SemiSupervisedVAE(nn.Module):
             variational_density=variational_density,
             log_ratio=log_ratio,
             qc_z1_all_probas=qc_z1_all_probas,
+            df=dfs,
         )
+        torch.cuda.synchronize()
         return variables
 
     def forward(
@@ -442,6 +622,7 @@ class SemiSupervisedVAE(nn.Module):
         reparam=True,
         encoder_key="default",
         counts=torch.tensor([8, 8, 2]),
+        return_outs: bool = False,
     ):
         """
 
@@ -466,9 +647,10 @@ class SemiSupervisedVAE(nn.Module):
             if not is_labelled:
                 # Unlabelled case: c latent variable
                 log_ratio -= vars["log_qc_z1"]
+        # everything_ok = log_ratio.ndim == 2 if is_labelled else log_ratio.ndim == 3
+        # assert everything_ok
 
-        everything_ok = log_ratio.ndim == 2 if is_labelled else log_ratio.ndim == 3
-        assert everything_ok
+        # log_ratio = torch.ones_like(vars["log_qz1_x"])
 
         if loss_type == "ELBO":
             loss = self.elbo(log_ratio, is_labelled=is_labelled, **vars)
@@ -484,7 +666,61 @@ class SemiSupervisedVAE(nn.Module):
             raise ValueError("Mode {} not recognized".format(loss_type))
         if torch.isnan(loss).any() or not torch.isfinite(loss).any():
             print("NaN loss")
-
+            diagnostic = {
+                "z1": (vars["z1"].min().item(), vars["z1"].max().item()),
+                "z2": (vars["z2"].min().item(), vars["z2"].max().item()),
+                "qz1_m": (vars["qz1_m"].min().item(), vars["qz1_m"].max().item()),
+                "qz1_v": (vars["qz1_v"].min().item(), vars["qz1_v"].max().item()),
+                "qz2_z1_m": (
+                    vars["qz2_z1_m"].min().item(),
+                    vars["qz2_z1_m"].max().item(),
+                ),
+                "qz2_z1_v": (
+                    vars["qz2_z1_v"].min().item(),
+                    vars["qz2_z1_v"].max().item(),
+                ),
+                "pz1_z2m": (vars["pz1_z2m"].min().item(), vars["pz1_z2m"].max().item()),
+                "pz1_z2_v": (
+                    vars["pz1_z2_v"].min().item(),
+                    vars["pz1_z2_v"].max().item(),
+                ),
+                "px_z_m": (vars["px_z_m"].min().item(), vars["px_z_m"].max().item()),
+                "log_qz1_x": (
+                    vars["log_qz1_x"].min().item(),
+                    vars["log_qz1_x"].max().item(),
+                ),
+                "qc_z1": (vars["qc_z1"].min().item(), vars["qc_z1"].max().item()),
+                "log_qc_z1": (
+                    vars["log_qc_z1"].min().item(),
+                    vars["log_qc_z1"].max().item(),
+                ),
+                "log_qz2_z1": (
+                    vars["log_qz2_z1"].min().item(),
+                    vars["log_qz2_z1"].max().item(),
+                ),
+                "log_pz2": (vars["log_pz2"].min().item(), vars["log_pz2"].max().item()),
+                "log_pc": (vars["log_pc"].min().item(), vars["log_pc"].max().item()),
+                "log_pz1_z2": (
+                    vars["log_pz1_z2"].min().item(),
+                    vars["log_pz1_z2"].max().item(),
+                ),
+                "log_px_z": (
+                    vars["log_px_z"].min().item(),
+                    vars["log_px_z"].max().item(),
+                ),
+                "log_ratio": (
+                    vars["log_ratio"].min().item(),
+                    vars["log_ratio"].max().item(),
+                ),
+            }
+            if vars["df"] is not None:
+                diagnostic["df"] = (
+                    vars["df"].min().item(),
+                    vars["df"].max().item(),
+                )
+            raise ValueError(diagnostic)
+        if return_outs:
+            return loss, vars
         return loss
 
     @staticmethod
@@ -562,7 +798,7 @@ class SemiSupervisedVAE(nn.Module):
     @staticmethod
     def cubo(log_ratios, is_labelled, evaluate=False, **kwargs):
         if is_labelled:
-            assert not evaluate
+            # assert not evaluate
             ws = torch.softmax(2 * log_ratios, dim=0)  # Corresponds to squaring
             cubo_loss = ws.detach() * (-1) * log_ratios
             return cubo_loss.mean()
