@@ -204,7 +204,7 @@ class GaussianPosterior(Posterior):
         return ave_var / n_samples
 
     @torch.no_grad()
-    def prob_eval(self, n_samples_mc, nu=0.0):
+    def prob_eval(self, n_samples_mc, nu=0.0, plugin_estimator: bool = False):
         # Iterate once over the posterior and get the marginal variance
         prob = []
         qz_m = []
@@ -212,7 +212,12 @@ class GaussianPosterior(Posterior):
         ess = []
         for i_batch, tensors in enumerate(self):
             data_tensor = torch.stack(tensors, 0)
-            x, y, z, t = self.model.prob_event(data_tensor, n_samples_mc, nu=nu)
+            if plugin_estimator:
+                x, y, z, t = self.model.prob_event_plugin(
+                    data_tensor, n_samples_mc, nu=nu
+                )
+            else:
+                x, y, z, t = self.model.prob_event(data_tensor, n_samples_mc, nu=nu)
             qz_m += [x.cpu()]
             qz_v += [y.cpu()]
             prob += [z.cpu()]

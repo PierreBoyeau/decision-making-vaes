@@ -137,9 +137,11 @@ class Posterior:
         do_observed_library=False,
         encoder_key="default",
         counts=None,
+        z_encoder=None,
     ):
         all_res = dict()
-        for tensors in self:
+        print("z_encoder None:", z_encoder is None)
+        for tensors in self.update({"batch_size": batch_size}):
             sample_batch, local_l_mean, local_l_var, batch_index, label = tensors
             res = self.model(
                 sample_batch,
@@ -151,6 +153,7 @@ class Posterior:
                 do_observed_library=do_observed_library,
                 encoder_key=encoder_key,
                 counts=counts,
+                z_encoder=z_encoder,
             )
             res["label"] = label
             if keys is not None:

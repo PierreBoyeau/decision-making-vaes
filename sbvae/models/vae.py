@@ -2,6 +2,7 @@
 """Main module."""
 
 import logging
+from typing import Union
 
 import numpy as np
 import torch
@@ -10,7 +11,7 @@ import torch.nn.functional as F
 from torch.distributions import Gamma, Normal, Poisson
 
 from sbvae.models.log_likelihood import log_nb_positive, log_zinb_positive
-from sbvae.models.modules import DecoderSCVI, Encoder, EncoderIAF
+from sbvae.models.modules import DecoderSCVI, Encoder, EncoderIAF, EncoderStudent
 from sbvae.models.utils import one_hot
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,8 @@ class VAE(nn.Module):
         n_hidden: int = 128,
         n_latent: int = 10,
         n_layers: int = 1,
+        do_student: bool = False,
+        student_df: Union[float, str] = 1.0,
         iaf_t: int = 0,
         dropout_rate: float = 0.1,
         dispersion: str = "gene",
@@ -66,6 +69,8 @@ class VAE(nn.Module):
         prevent_library_saturation: bool = False,
         prevent_library_saturation2: bool = False,
         multi_encoder_keys=["default"],
+        use_batch_norm: bool = True,
+        verbose: bool = False,
     ):
         super().__init__()
         self.dispersion = dispersion
@@ -93,8 +98,9 @@ class VAE(nn.Module):
 
         # z encoder goes from the n_input-dimensional data to an n_latent-d
         # latent space representation
+        self.do_student = do_student
         self.do_iaf = iaf_t > 0
-        if not self.do_iaf:
+        if (not self.do_iaf) and (not self.do_student):
             logger.info("using MF encoder")
             self.z_encoder = nn.ModuleDict(
                 {
@@ -104,23 +110,47 @@ class VAE(nn.Module):
                         n_layers=n_layers,
                         n_hidden=n_hidden,
                         dropout_rate=dropout_rate,
+                        use_batch_norm=use_batch_norm,
                     )
                     for key in self.multi_encoder_keys
                 }
             )
+        elif do_student:
+            logger.info("Using student encoder")
+            logger.info("df : {}".format(student_df))
+            self.z_encoder = nn.ModuleDict(
+                {
+                    key: EncoderStudent(
+                        n_input,
+                        n_latent,
+                        n_layers=n_layers,
+                        n_hidden=n_hidden,
+                        df=student_df,
+                        dropout_rate=dropout_rate,
+                        use_batch_norm=use_batch_norm,
+                        verbose=verbose,
+                    )
+                    for key in self.multi_encoder_keys
+                }
+            )
+
         else:
             logger.info("using IAF encoder")
             assert not do_multi_encoders
-            self.z_encoder = EncoderIAF(
-                n_in=n_input,
-                n_latent=n_latent,
-                n_cat_list=None,
-                n_hidden=n_hidden,
-                n_layers=n_layers,
-                t=iaf_t,
-                dropout_rate=dropout_rate,
-                use_batch_norm=True,
-                do_h=True,
+            self.z_encoder = nn.ModuleDict(
+                {
+                    "default": EncoderIAF(
+                        n_in=n_input,
+                        n_latent=n_latent,
+                        n_cat_list=None,
+                        n_hidden=n_hidden,
+                        n_layers=n_layers,
+                        t=iaf_t,
+                        dropout_rate=dropout_rate,
+                        use_batch_norm=use_batch_norm,
+                        do_h=True,
+                    )
+                }
             )
         # l encoder goes from n_input-dimensional data to 1-d library size
         self.l_encoder = Encoder(
@@ -131,6 +161,7 @@ class VAE(nn.Module):
             dropout_rate=dropout_rate,
             prevent_saturation=prevent_library_saturation,
             prevent_saturation2=prevent_library_saturation2,
+            use_batch_norm=use_batch_norm,
         )
         # decoder goes from n_latent-dimensional space to n_input-d data
         self.decoder = DecoderSCVI(
@@ -139,20 +170,27 @@ class VAE(nn.Module):
             n_cat_list=[n_batch],
             n_layers=n_layers,
             n_hidden=n_hidden,
+            use_batch_norm=use_batch_norm,
         )
-
-        assert not self.do_iaf
+        self.debug_ranges = []
+        # assert not self.do_iaf
 
     @torch.no_grad()
-    def z_defensive_sampling(self, x, counts):
+    def z_defensive_sampling(self, x, counts, z_encoder=None):
         """
             Samples from q_alpha
             q_alpha = \alpha_0 q_CUBO + \alpha_1 q_EUBO + \alpha_2 prior
         """
+        assert not self.do_iaf
+        if z_encoder is None:
+            z_def_enc = self.z_encoder
+        else:
+            z_def_enc = z_encoder
+
         n_samples_total = counts.sum()
         n_batch, _ = x.shape
         # with torch.no_grad():
-        post_cubo = self.z_encoder["CUBO"](
+        post_cubo = z_def_enc["CUBO"](
             x=x, n_samples=counts[0], reparam=False, squeeze=False
         )
         if counts[0] >= 1:
@@ -163,7 +201,7 @@ class VAE(nn.Module):
             z_cubo = torch.tensor([], device="cuda")
             q_cubo = None
 
-        post_eubo = self.z_encoder["EUBO"](
+        post_eubo = z_def_enc["EUBO"](
             x=x, n_samples=counts[1], reparam=False, squeeze=False
         )
         if counts[1] >= 1:
@@ -221,7 +259,13 @@ class VAE(nn.Module):
         observed_library=None,
         encoder_key: str = "default",
         counts: torch.Tensor = None,
+        z_encoder=None,
     ):
+        if z_encoder is None:
+            z_enc_of_use = self.z_encoder
+        else:
+            z_enc_of_use = z_encoder
+            # print("using evaluation z encoder")
         x_ = x
         if self.log_variational:
             x_ = torch.log(1 + x_)
@@ -236,32 +280,51 @@ class VAE(nn.Module):
 
         if observed_library is None:
             library = library_variables["library"]
+            raise ValueError
         else:
             library = observed_library
 
         # Z sampling
         if encoder_key != "defensive":
-            z_post = self.z_encoder[encoder_key](
+            z_post = z_enc_of_use[encoder_key](
                 x_, y, n_samples=n_samples, reparam=reparam
             )
         else:
-            z_post = self.z_defensive_sampling(x_, counts=counts)
+            z_post = self.z_defensive_sampling(x_, counts=counts, z_encoder=z_encoder)
 
-        if self.do_iaf or encoder_key == "defensive":
-            # IAF does not parametrize the means/covariances of the variational posterior
-            z_variables = dict(
-                qz_m=None,
-                qz_v=None,
-                z=z_post["latent"],
-                log_qz_x=z_post["posterior_density"],
+        # if self.do_iaf or encoder_key == "defensive":
+        #     # IAF does not parametrize the means/covariances of the variational posterior
+        #     z_variables = dict(
+        #         qz_m=None,
+        #         qz_v=None,
+        #         z=z_post["latent"],
+        #         log_qz_x=z_post["posterior_density"],
+        #     )
+        # else:
+        #     z_variables = dict(
+        #         qz_m=z_post["q_m"],
+        #         qz_v=z_post["q_v"],
+        #         z=z_post["latent"],
+        #         log_qz_x=None,
+        #     )
+        z_variables = dict(
+            qz_m=z_post["q_m"],
+            qz_v=z_post["q_v"],
+            z=z_post["latent"],
+            log_qz_x=z_post["posterior_density"],
+        )
+        self.debug_ranges.append(
+            dict(
+                # qz_m=(z_post["q_m"].min().item(), z_post["q_m"].max().item()),
+                # qz_v=(z_post["q_v"].min().item(), z_post["q_v"].max().item()),
+                z=(z_post["latent"].min().item(), z_post["latent"].max().item()),
+                # log_qz_x=(
+                #     z_post["posterior_density"].min().item(),
+                #     z_post["posterior_density"].max().item(),
+                # ),
+                # df=(z_post["df"].min().item(), z_post["df"].max().item()),
             )
-        else:
-            z_variables = dict(
-                qz_m=z_post["q_m"],
-                qz_v=z_post["q_v"],
-                z=z_post["latent"],
-                log_qz_x=None,
-            )
+        )
 
         # Decoder pass
         px_scale, px_r, px_rate, px_dropout = self.decoder(
@@ -320,6 +383,8 @@ class VAE(nn.Module):
         :param log_ql_x:
         :return:
         """
+        # TODO: Student under Normal density!!!
+        # TODO: causing NaNs of course!
         log_px_zl = (-1) * self._reconstruction_loss(x, px_rate, px_r, px_dropout)
         if log_qz_x is None:
             log_qz_x = Normal(qz_m, torch.sqrt(qz_v)).log_prob(z).sum(dim=-1)
@@ -329,15 +394,6 @@ class VAE(nn.Module):
         log_pl = (
             Normal(local_l_mean, torch.sqrt(local_l_var)).log_prob(library).sum(dim=-1)
         )
-
-        a1_issue = torch.isnan(log_px_zl).any() or torch.isinf(log_px_zl).any()
-        a2_issue = torch.isnan(log_pl).any() or torch.isinf(log_pl).any()
-        a3_issue = torch.isnan(log_pz).any() or torch.isinf(log_pz).any()
-        a4_issue = torch.isnan(log_qz_x).any() or torch.isinf(log_qz_x).any()
-        a5_issue = torch.isnan(log_ql_x).any() or torch.isinf(log_ql_x).any()
-
-        if a1_issue or a2_issue or a3_issue or a4_issue or a5_issue:
-            print("aie")
 
         return dict(
             log_px_zl=log_px_zl,
@@ -431,6 +487,7 @@ class VAE(nn.Module):
         do_observed_library=False,
         counts=None,
         encoder_key="default",
+        z_encoder=None,
     ):
         r""" Returns the reconstruction loss and the Kullback divergences
 
@@ -461,10 +518,26 @@ class VAE(nn.Module):
             observed_library=observed_library,
             counts=counts,
             encoder_key=encoder_key,
+            z_encoder=z_encoder,
         )
         op = self.from_variables_to_densities(
             x=x, local_l_mean=local_l_mean, local_l_var=local_l_var, **variables
         )
+        a1_issue = (
+            torch.isnan(op["log_px_zl"]).any() or torch.isinf(op["log_px_zl"]).any()
+        )
+        a2_issue = torch.isnan(op["log_pl"]).any() or torch.isinf(op["log_pl"]).any()
+        a3_issue = torch.isnan(op["log_pz"]).any() or torch.isinf(op["log_pz"]).any()
+        a4_issue = (
+            torch.isnan(op["log_qz_x"]).any() or torch.isinf(op["log_qz_x"]).any()
+        )
+        a5_issue = (
+            torch.isnan(op["log_ql_x"]).any() or torch.isinf(op["log_ql_x"]).any()
+        )
+        is_issue = a1_issue or a2_issue or a3_issue or a4_issue or a5_issue
+        if is_issue:
+            print("is issue")
+            raise ValueError
 
         if do_observed_library:
             log_ratio = op["log_px_zl"] + op["log_pz"] - op["log_qz_x"]
@@ -490,6 +563,9 @@ class VAE(nn.Module):
         elif loss_type == "IWELBO":
             assert n_samples >= 2
             loss = self.iwelbo(log_ratio)
+        elif loss_type == "IWELBOB":
+            assert n_samples >= 2
+            loss = self.iwelbob(log_ratio)
         else:
             cubo_loss = torch.logsumexp(2 * log_ratio, dim=0) - np.log(n_samples)
             cubo_loss = 0.5 * cubo_loss
@@ -509,6 +585,13 @@ class VAE(nn.Module):
     @staticmethod
     def iwelbo(log_ratio):
         return -(torch.softmax(log_ratio, dim=0).detach() * log_ratio).sum(dim=0)
+
+    @staticmethod
+    def iwelbob(log_ratio):
+        n_samples = log_ratio.shape[0]
+        iwelbo = torch.logsumexp(log_ratio, dim=0) - np.log(n_samples)
+        return -iwelbo
+        # return -(torch.softmax(log_ratio, dim=0).detach() * log_ratio).sum(dim=0)
 
     @staticmethod
     def cubo(log_ratio):
