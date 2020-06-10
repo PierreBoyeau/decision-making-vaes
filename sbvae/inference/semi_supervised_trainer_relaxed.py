@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from sbvae.dataset import MnistDataset
-from sbvae.models import SemiSupervisedVAE
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +19,7 @@ class MnistRTrainer:
     def __init__(
         self,
         dataset: MnistDataset,
-        model: SemiSupervisedVAE,
+        model,
         batch_size: int = 128,
         classify_mode: str = "vanilla",
         r: float = 5e-4,
