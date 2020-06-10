@@ -6,6 +6,7 @@ from typing import Union
 
 import numpy as np
 import torch
+import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Gamma, Normal, Poisson
@@ -175,62 +176,118 @@ class VAE(nn.Module):
         self.debug_ranges = []
         # assert not self.do_iaf
 
+    # @torch.no_grad()
+    # def z_defensive_sampling(self, x, counts, z_encoder=None):
+    #     """
+    #         Samples from q_alpha
+    #         q_alpha = \alpha_0 q_CUBO + \alpha_1 q_EUBO + \alpha_2 prior
+    #     """
+    #     assert not self.do_iaf
+    #     if z_encoder is None:
+    #         z_def_enc = self.z_encoder
+    #     else:
+    #         z_def_enc = z_encoder
+
+    #     n_samples_total = counts.sum()
+    #     n_batch, _ = x.shape
+    #     # with torch.no_grad():
+    #     post_cubo = z_def_enc["CUBO"](
+    #         x=x, n_samples=counts[0], reparam=False, squeeze=False
+    #     )
+    #     if counts[0] >= 1:
+    #         z_cubo = post_cubo["latent"]
+    #         q_cubo = Normal(post_cubo["q_m"][0], post_cubo["q_v"][0].sqrt())
+    #     else:
+    #         # Specific handling of counts=0 required for latter concatenation
+    #         z_cubo = torch.tensor([], device="cuda")
+    #         q_cubo = None
+
+    #     post_eubo = z_def_enc["EUBO"](
+    #         x=x, n_samples=counts[1], reparam=False, squeeze=False
+    #     )
+    #     if counts[1] >= 1:
+    #         z_eubo = post_eubo["latent"]
+    #         q_eubo = Normal(post_eubo["q_m"][0], post_eubo["q_v"][0].sqrt())
+    #     else:
+    #         # Specific handling of counts=0 required for latter concatenation
+    #         z_eubo = torch.tensor([], device="cuda")
+    #         q_eubo = None
+
+    #     z_prior = self.z_prior.sample((counts[2], n_batch))
+    #     q_prior = self.z_prior
+
+    #     z_all = torch.cat([z_cubo, z_eubo, z_prior], dim=0)
+    #     distribs_all = [q_cubo, q_eubo, q_prior]
+    #     # Mixture probability
+    #     # q_alpha = sum p(alpha_j) * q_j(x)
+    #     log_p_alpha = (1.0 * counts / counts.sum()).log()
+
+    #     log_contribs = []
+    #     for count, distrib, log_p_a in zip(counts, distribs_all, log_p_alpha):
+    #         if count >= 1:
+    #             contribution = distrib.log_prob(z_all).sum(-1) + log_p_a
+    #             contribution = contribution.view(n_samples_total, n_batch, 1)
+    #             log_contribs.append(contribution)
+
+    #     log_q_alpha = torch.cat(log_contribs, dim=2)
+    #     log_q_alpha = torch.logsumexp(log_q_alpha, dim=2)
+    #     return dict(latent=z_all, posterior_density=log_q_alpha)
+
     @torch.no_grad()
-    def z_defensive_sampling(self, x, counts, z_encoder=None):
+    def z_defensive_sampling(self, x, counts: pd.Series, z_encoder=None):
         """
             Samples from q_alpha
             q_alpha = \alpha_0 q_CUBO + \alpha_1 q_EUBO + \alpha_2 prior
         """
-        assert not self.do_iaf
+        print(counts)
+        counts = counts.astype(int)
         if z_encoder is None:
-            z_def_enc = self.z_encoder
+            z_encoder_is_none = self.encoder
         else:
-            z_def_enc = z_encoder
+            z_encoder_is_none = z_encoder
+        batch_size = x.shape[0]
+        device = x.device
 
-        n_samples_total = counts.sum()
-        n_batch, _ = x.shape
-        # with torch.no_grad():
-        post_cubo = z_def_enc["CUBO"](
-            x=x, n_samples=counts[0], reparam=False, squeeze=False
-        )
-        if counts[0] >= 1:
-            z_cubo = post_cubo["latent"]
-            q_cubo = Normal(post_cubo["q_m"][0], post_cubo["q_v"][0].sqrt())
-        else:
-            # Specific handling of counts=0 required for latter concatenation
-            z_cubo = torch.tensor([], device="cuda")
-            q_cubo = None
+        z_all = []
+        distribs = dict()
+        sum_lasts = dict()
 
-        post_eubo = z_def_enc["EUBO"](
-            x=x, n_samples=counts[1], reparam=False, squeeze=False
-        )
-        if counts[1] >= 1:
-            z_eubo = post_eubo["latent"]
-            q_eubo = Normal(post_eubo["q_m"][0], post_eubo["q_v"][0].sqrt())
-        else:
-            # Specific handling of counts=0 required for latter concatenation
-            z_eubo = torch.tensor([], device="cuda")
-            q_eubo = None
+        enc_keys = counts.index.values
+        for key in enc_keys:
+            if key == "prior":
+                q_m_prior = torch.zeros(self.n_latent, device=device)
+                q_v_prior = torch.ones(self.n_latent, device=device)
+                q_prior = Normal(q_m_prior, q_v_prior)
+                z_prior = q_prior.sample((counts[key], batch_size))
 
-        z_prior = self.z_prior.sample((counts[2], n_batch))
-        q_prior = self.z_prior
+                z_all.append(z_prior)
+                sum_lasts[key] = True
+                distribs[key] = q_prior
+            else:
+                q = z_encoder_is_none[key](x, None)
+                q_dist = q["dist"]
+                z_i = q_dist.sample((counts[key],))
 
-        z_all = torch.cat([z_cubo, z_eubo, z_prior], dim=0)
-        distribs_all = [q_cubo, q_eubo, q_prior]
-        # Mixture probability
-        # q_alpha = sum p(alpha_j) * q_j(x)
-        log_p_alpha = (1.0 * counts / counts.sum()).log()
+                z_all.append(z_i)
+                sum_lasts[key] = q["sum_last"]
+                distribs[key] = q_dist
+
+        z = torch.cat(z_all)
+        p_alpha = 1.0 * counts / counts.sum()
+        log_p_alpha = p_alpha.apply(np.log)
 
         log_contribs = []
-        for count, distrib, log_p_a in zip(counts, distribs_all, log_p_alpha):
-            if count >= 1:
-                contribution = distrib.log_prob(z_all).sum(-1) + log_p_a
-                contribution = contribution.view(n_samples_total, n_batch, 1)
-                log_contribs.append(contribution)
 
-        log_q_alpha = torch.cat(log_contribs, dim=2)
-        log_q_alpha = torch.logsumexp(log_q_alpha, dim=2)
-        return dict(latent=z_all, posterior_density=log_q_alpha)
+        for key in enc_keys:
+            if counts[key] >= 1:
+                log_q = distribs[key].log_prob(z)
+                if sum_lasts[key]:
+                    log_q = log_q.sum(-1)
+                log_contribs.append((log_q + log_p_alpha[key]).unsqueeze(-1))
+        log_contribs = torch.cat(log_contribs, dim=-1)
+        log_qz_given_x = torch.logsumexp(log_contribs, dim=-1)
+
+        return dict(latent=z, posterior_density=log_qz_given_x, q_m=None, q_v=None)
 
     def _reconstruction_loss(self, x, px_rate, px_r, px_dropout):
         # Reconstruction Loss
@@ -280,7 +337,7 @@ class VAE(nn.Module):
 
         if observed_library is None:
             library = library_variables["library"]
-            raise ValueError
+            # raise ValueError
         else:
             library = observed_library
 
@@ -292,21 +349,6 @@ class VAE(nn.Module):
         else:
             z_post = self.z_defensive_sampling(x_, counts=counts, z_encoder=z_encoder)
 
-        # if self.do_iaf or encoder_key == "defensive":
-        #     # IAF does not parametrize the means/covariances of the variational posterior
-        #     z_variables = dict(
-        #         qz_m=None,
-        #         qz_v=None,
-        #         z=z_post["latent"],
-        #         log_qz_x=z_post["posterior_density"],
-        #     )
-        # else:
-        #     z_variables = dict(
-        #         qz_m=z_post["q_m"],
-        #         qz_v=z_post["q_v"],
-        #         z=z_post["latent"],
-        #         log_qz_x=None,
-        #     )
         z_variables = dict(
             qz_m=z_post["q_m"],
             qz_v=z_post["q_v"],
@@ -537,6 +579,34 @@ class VAE(nn.Module):
         is_issue = a1_issue or a2_issue or a3_issue or a4_issue or a5_issue
         if is_issue:
             print("is issue")
+            diagnostic = (
+                (
+                    "log_px_zl",
+                    op["log_px_zl"].min().item(),
+                    op["log_px_zl"].max().item(),
+                ),
+                ("log_pz", op["log_pz"].min().item(), op["log_pz"].max().item()),
+                ("log_qz_x", op["log_qz_x"].min().item(), op["log_qz_x"].max().item()),
+                ("qz_m", op["qz_m"].min().item(), op["qz_m"].max().item()),
+                ("qz_v", op["qz_v"].min().item(), op["qz_v"].max().item()),
+                ("z", op["z"].min().item(), op["z"].max().item()),
+            )
+
+            for key in diagnostic:
+                print(key)
+
+            if not do_observed_library:
+                print(
+                    ("log_pl", op["log_pl"].min().item(), op["log_pl"].max().item()),
+                    (
+                        "log_ql_x",
+                        op["log_ql_x"].min().item(),
+                        op["log_ql_x"].max().item(),
+                    ),
+                    ("ql_m", op["ql_m"].min().item(), op["ql_m"].max().item()),
+                    ("ql_v", op["ql_v"].min().item(), op["ql_v"].max().item()),
+                    ("library", op["library"].min().item(), op["library"].max().item()),
+                )
             raise ValueError
 
         if do_observed_library:

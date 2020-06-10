@@ -126,6 +126,9 @@ class LinearGaussianDefensive(nn.Module):
             res = nn.Tanh()(self._px_log_diag_var)
             res = 1.0 / (1.0 - (res ** 2))
             return (1e-16 - 1.0 + res).log()
+            # res = self._px_log_diag_var
+            # res = res * torch.sin(res)
+            # return res
 
     def get_std(self):
         return torch.sqrt(torch.exp(self.px_log_diag_var))
@@ -578,7 +581,14 @@ class LinearGaussianDefensive(nn.Module):
             )
         if param == "IWELBO":
             n_samples_mc = 80 if n_samples_mc is None else n_samples_mc
-            return self.neg_iwelbo(
+            # return self.neg_iwelbo(
+            #     x,
+            #     n_samples_mc=n_samples_mc,
+            #     encoder_key=encoder_key,
+            #     counts=counts,
+            #     z_encoder=z_encoder,
+            # )
+            return self.neg_iwelbo_grad(
                 x,
                 n_samples_mc=n_samples_mc,
                 encoder_key=encoder_key,
@@ -594,7 +604,7 @@ class LinearGaussianDefensive(nn.Module):
                 z_encoder=z_encoder,
             )
         else:
-            raise ValueError("Objective function {} unknown".format(paramre))
+            raise ValueError("Objective function {} unknown".format(param))
 
     def joint_log_likelihood(self, xz, pxz_mean, pxz_var):
         if self.learn_var:
@@ -687,11 +697,13 @@ class LinearGaussianDefensive(nn.Module):
         if hasattr(nu, "__len__"):
             res = []
             for nu_item in nu:
-                res_item = (z[:, :, 0] <= nu_item).float().mean(-1)
+                res_item = torch.mean((z[:, :, 0] <= nu_item).float(), dim=0)
                 res.append(res_item.view(-1, 1))
             res = torch.cat(res, dim=-1)
         else:
-            raise NotImplementedError
+            res = torch.sum(ratio * (z[:, :, 0] <= nu).float(), dim=0) / torch.sum(
+                ratio, dim=0
+            )
 
         # get ESS
         ess = torch.sum(ratio, dim=0) ** 2 / torch.sum(ratio ** 2, dim=0)

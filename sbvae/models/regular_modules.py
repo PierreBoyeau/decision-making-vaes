@@ -104,6 +104,7 @@ class EncoderB(nn.Module):
     def __init__(
         self, n_input, n_output, n_hidden, dropout_rate, do_batch_norm, n_middle=None
     ):
+        # TODO: describe architecture and choice for people 
         super().__init__()
         logging.info("Using MF encoder with convolutions")
         self.encoder_cv = nn.Sequential(
@@ -383,7 +384,7 @@ class ClassifierA(nn.Module):
         probas = self.classifier(x)
         probas = probas + 1e-16
         probas = probas / probas.sum(-1, keepdim=True)
-        return probas
+        return probas    
 
 
 class BernoulliDecoderA(nn.Module):

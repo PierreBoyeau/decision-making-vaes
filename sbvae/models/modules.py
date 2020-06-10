@@ -183,7 +183,7 @@ class Encoder(nn.Module):
         # Parameters for latent distribution
         q = self.encoder(x, *cat_list)
         q_m = self.mean_encoder(q)
-        q_v = 1e-16 + self.var_encoder(q)
+        q_v = self.var_encoder(q)
 
         if self.prevent_saturation:
             q_m = 12.0 * nn.Tanh()(q_m)
@@ -195,8 +195,8 @@ class Encoder(nn.Module):
             q_v = torch.clamp(q_v, min=-18.0, max=0.1)
             q_v = torch.exp(q_v)
         else:
-            q_v = torch.clamp(q_v, min=-18.0, max=14.0)
-            q_v = 1e-16 + torch.exp(
+            q_v = torch.clamp(q_v, min=-12.0, max=8.0)
+            q_v = torch.exp(
                 self.var_encoder(q)
             )  # (computational stability safeguard)torch.clamp(, -5, 5)
         if (n_samples > 1) or (not squeeze):
