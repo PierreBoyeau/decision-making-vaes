@@ -14,7 +14,6 @@ from sklearn.metrics import normalized_mutual_info_score as NMI
 from sklearn.metrics import silhouette_score
 from sklearn.mixture import GaussianMixture as GMM
 from sklearn.neighbors import KNeighborsRegressor, NearestNeighbors
-from sklearn.utils.linear_assignment_ import linear_assignment
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import (
     RandomSampler,
@@ -984,23 +983,6 @@ def nn_overlap(X1, X2, k=100):
         / (float(len(set_1)) * len(set_2))
     )
     return spearman_correlation, fold_enrichment
-
-
-def unsupervised_clustering_accuracy(y, y_pred):
-    """
-    Unsupervised Clustering Accuracy
-    """
-    assert len(y_pred) == len(y)
-    u = np.unique(np.concatenate((y, y_pred)))
-    n_clusters = len(u)
-    mapping = dict(zip(u, range(n_clusters)))
-    reward_matrix = np.zeros((n_clusters, n_clusters), dtype=np.int64)
-    for y_pred_, y_ in zip(y_pred, y):
-        if y_ in mapping:
-            reward_matrix[mapping[y_pred_], mapping[y_]] += 1
-    cost_matrix = reward_matrix.max() - reward_matrix
-    ind = linear_assignment(cost_matrix)
-    return sum([reward_matrix[i, j] for i, j in ind]) * 1.0 / y_pred.size, ind
 
 
 def knn_purity(latent, label, n_neighbors=30):
