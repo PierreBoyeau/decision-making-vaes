@@ -4,7 +4,9 @@ import pandas as pd
 from tqdm.auto import tqdm
 import numpy as np
 import torch
+from sklearn import metrics
 from sklearn.metrics import precision_score, recall_score
+import torch.distributions as db
 from torch import nn
 from arviz.stats import psislw
 
@@ -15,63 +17,9 @@ from sbvae.dataset import GeneExpressionDataset
 NUMS = 5
 N_PICKS = 30
 N_CELLS = 5
-COUNTS_EVAL = torch.tensor([1, 1, 0])
-
-# 1. Dataset
-## Option 1
-# DO_POISSON = False
-# SYMSIM_DATA_PATH = "/data/yosef2/users/pierreboyeau/sbVAE/DE"
-
-# ## Option 2
-# DO_POISSON = False
-# # SYMSIM_DATA_PATH = "/data/yosef2/users/pierreboyeau/symsim_result_complete/DE"
-# # K_ON = pd.read_csv(os.path.join(SYMSIM_DATA_PATH, "DE_med.kon_mat.csv")).values.T
-# # K_OFF = pd.read_csv(os.path.join(SYMSIM_DATA_PATH, "DE_med.koff_mat.csv")).values.T
-# # S_MAT = pd.read_csv(os.path.join(SYMSIM_DATA_PATH, "DE_med.s_mat.csv")).values.T
-
-
-# X_OBS_ALL = pd.read_csv(
-#     os.path.join(SYMSIM_DATA_PATH, "DE_med.obsv.3.csv"), index_col=0
-# ).T
-# # SELECT_GENE = np.where(X_OBS_ALL.mean(0) <= 1000)[0]
-# SELECT_GENE = np.arange(X_OBS_ALL.shape[1])
-# X_OBS = X_OBS_ALL.iloc[:, SELECT_GENE]
-# BATCH_INFO = (
-#     pd.read_csv(os.path.join(SYMSIM_DATA_PATH, "DE_med.batchid.csv"), index_col=0) - 1
-# )
-# METADATA = pd.read_csv(
-#     os.path.join(SYMSIM_DATA_PATH, "DE_med.cell_meta.csv"), index_col=0
-# )
-# TRUE_ = pd.read_csv(
-#     os.path.join(SYMSIM_DATA_PATH, "DE_med.true.csv"), index_col=0
-# ).T.iloc[:, SELECT_GENE]
-# LFC_INFO = pd.read_csv(
-#     os.path.join(SYMSIM_DATA_PATH, "med_theoreticalFC.csv"), index_col=0
-# ).iloc[SELECT_GENE, :]
-# DATASET = GeneExpressionDataset(
-#     *GeneExpressionDataset.get_attributes_from_matrix(
-#         X=X_OBS.values,
-#         batch_indices=BATCH_INFO["x"].values,
-#         labels=METADATA["pop"].values,
-#     )
-# )
-
-# SAMPLE_IDX = np.loadtxt(
-#     os.path.join(SYMSIM_DATA_PATH, "sample_idx_symsim.tsv"), dtype=np.int32
-# )
-# X_U = torch.tensor(DATASET.X[SAMPLE_IDX]).to("cuda")
-# LOCAL_L_MEAN = torch.tensor(DATASET.local_vars[SAMPLE_IDX]).to("cuda")
-# LOCAL_L_VAR = torch.tensor(DATASET.local_means[SAMPLE_IDX]).to("cuda")
-# LABEL_A = 0
-# LABEL_B = 1
-# N_GENES = DATASET.nb_genes
-# Y = METADATA["pop"].values
-# IS_SIGNIFICANT_DE = (LFC_INFO["12"].abs() >= 0.5).values
-# LFC_GT = LFC_INFO["12"].values
-
-
+SEEDS = np.arange(500)
 # option 3
-n_genes = 1000
+n_genes = 100
 DO_POISSON = True
 
 import torch.distributions as distributions
@@ -96,7 +44,10 @@ class SignedGamma:
         return signs * gammas
 
 
-means = 10 + 100 * torch.rand(n_genes)
+torch.manual_seed(42)
+np.random.seed(42)
+
+means = 10 + 50 * torch.rand(n_genes)
 means = means.numpy()
 
 means[means >= 1000] = 1000
@@ -105,6 +56,12 @@ lfc_sampler = SignedGamma(dim=2, proba_pos=0.5)
 lfcs = lfc_sampler.sample(n_genes).numpy()
 non_de_genes = np.random.choice(n_genes, size=300)
 lfcs[non_de_genes, :] = 0.0
+
+lfcs = torch.zeros(n_genes, 2)
+non_de_genes = torch.rand(n_genes) <= 0.5
+lfcs[non_de_genes, 1] = 0.16 * torch.randn_like(lfcs[non_de_genes, 1])
+sign = 2.0 * (torch.rand_like(lfcs[~non_de_genes, 1]) > 0.5) - 1.0
+lfcs[~non_de_genes, 1] = sign + 0.16 * torch.randn_like(lfcs[~non_de_genes, 1])
 
 # Constructing sigma and mus
 log2_mu0 = lfcs[:, 0] + np.log2(means)
@@ -118,16 +75,17 @@ sigma = 2.0 * a.dot(a.T) + 0.5 * (
     1.0 + 0.5 * (2.0 * np.random.random(n_genes) - 1.0)
 ) * np.eye(n_genes)
 
-sigma0 = 0.1 * sigma
+sigma0 = 0.08 * sigma
 sigma1 = sigma0
+N_CELLS = 1000
 
 # Poisson rates
 h0 = torch.distributions.MultivariateNormal(
     loc=torch.tensor(loge_mu0).float(), covariance_matrix=torch.tensor(sigma0).float()
-).sample((5000,))
+).sample((N_CELLS // 2,))
 h1 = torch.distributions.MultivariateNormal(
     loc=torch.tensor(loge_mu1).float(), covariance_matrix=torch.tensor(sigma1).float()
-).sample((5000,))
+).sample((N_CELLS // 2,))
 h = torch.cat([h0, h1])
 
 # Data sampling
@@ -136,8 +94,8 @@ x_obs = torch.distributions.Poisson(rate=h.exp()).sample()
 is_zi = torch.rand_like(x_obs) <= 0.3
 # print("Added zeros: ", is_zi.mean())
 x_obs = x_obs * (1.0 - is_zi.double())
-labels = torch.zeros((10000, 1))
-labels[5000:] = 1
+labels = torch.zeros((N_CELLS, 1))
+labels[N_CELLS // 2 :] = 1
 
 not_null_cell = x_obs.sum(1) != 0
 x_obs = x_obs[not_null_cell]
@@ -153,63 +111,17 @@ DATASET = GeneExpressionDataset(
     )
 )
 
-SAMPLE_IDX = np.random.choice(10000, 64)
+SAMPLE_IDX = np.random.choice(N_CELLS, 64)
 Y = labels
 X_U = torch.tensor(DATASET.X[SAMPLE_IDX]).to("cuda")
 LOCAL_L_MEAN = torch.tensor(DATASET.local_vars[SAMPLE_IDX]).to("cuda")
 LOCAL_L_VAR = torch.tensor(DATASET.local_means[SAMPLE_IDX]).to("cuda")
-N_GENES = 1000
+N_GENES = n_genes
 
 
-# def get_predictions(
-#     post,
-#     samp_a,
-#     samp_b,
-#     encoder_key,
-#     counts,
-#     n_post_samples=50,
-#     importance_sampling=True,
-#     encoder=None,
-# ):
-#     n_samples = len(samp_a)
-#     softmax = nn.Softmax(dim=0)
-
-#     my_multicounts = None
-#     if encoder_key == "defensive":
-#         factor_counts = n_post_samples // counts.sum()
-#         n_post_samples = factor_counts * counts.sum()
-#         my_multicounts = factor_counts * counts
-#     post_vals = post.getter(
-#         keys=["px_scale", "log_ratio"],
-#         n_samples=n_post_samples,
-#         do_observed_library=True,
-#         encoder_key=encoder_key,
-#         counts=my_multicounts,
-#         z_encoder=encoder,
-#     )
-
-#     if importance_sampling:
-#         w_a = post_vals["log_ratio"][:, samp_a]
-#         w_a = softmax(w_a).view(n_post_samples, 1, n_samples, 1)
-#         w_b = post_vals["log_ratio"][:, samp_b]
-#         w_b = softmax(w_b).view(1, n_post_samples, n_samples, 1)
-
-#         y_pred = post_vals["px_scale"][:, samp_a].log2().view(
-#             n_post_samples, 1, n_samples, -1
-#         ) - post_vals["px_scale"][:, samp_b].log2().view(
-#             1, n_post_samples, n_samples, -1
-#         )
-#         y_pred = (y_pred.abs() >= 0.5).float()
-#         y_pred = y_pred * w_a * w_b
-#         y_pred = y_pred.sum([0, 1]).mean(0)
-#     else:
-#         y_pred = (
-#             post_vals["px_scale"][:, samp_a].log2()
-#             - post_vals["px_scale"][:, samp_b].log2()
-#         )
-#         y_pred = (y_pred.abs() >= 0.5).float()
-#         y_pred = y_pred.mean((0, 1))
-#     return y_pred
+def prauc(y, pred):
+    prec, rec, thres = metrics.precision_recall_curve(y_true=y, probas_pred=pred)
+    return metrics.auc(rec, prec)
 
 
 def get_predictions(
@@ -221,8 +133,8 @@ def get_predictions(
     n_post_samples=50,
     importance_sampling=True,
     encoder=None,
+    do_observed_library=True,
 ):
-    n_samples = len(samp_a)
     softmax = nn.Softmax(dim=0)
 
     my_multicounts = None
@@ -233,40 +145,73 @@ def get_predictions(
     post_vals = post.getter(
         keys=["px_scale", "log_ratio"],
         n_samples=n_post_samples,
-        do_observed_library=True,
+        do_observed_library=do_observed_library,
         encoder_key=encoder_key,
         counts=my_multicounts,
         z_encoder=encoder,
     )
 
     if importance_sampling:
-        # sampling pairs of cells
-        cells_a = np.random.choice(samp_a, size=4 * n_samples)
-        cells_b = np.random.choice(samp_b, size=4 * n_samples)
-
-        all_preds = []
-        for cell_a, cell_b in zip(tqdm(cells_a), cells_b):
-            w_a = post_vals["log_ratio"][:, cell_a]
-            w_a = softmax(w_a).view(n_post_samples, 1, 1)
-            w_b = post_vals["log_ratio"][:, cell_b]
-            w_b = softmax(w_b).view(1, n_post_samples, 1)
-
-            y_pred = post_vals["px_scale"][:, cell_a].log2().view(
-                n_post_samples, 1, -1
-            ) - post_vals["px_scale"][:, cell_b].log2().view(1, n_post_samples, -1)
-            y_pred = (y_pred.abs() >= 0.5).float()
-            y_pred = y_pred * w_a * w_b
-            y_pred = y_pred.sum([0, 1])
-            all_preds.append(y_pred.unsqueeze(0))
-        all_preds = torch.cat(all_preds, dim=0)
-        return all_preds.mean(0)
-    else:
-        y_pred = (
-            post_vals["px_scale"][:, samp_a].log2()
-            - post_vals["px_scale"][:, samp_b].log2()
+        n_post, n_cells = post_vals["log_ratio"].shape
+        # n_post, n_cells
+        w_a = post_vals["log_ratio"][:, samp_a]
+        h_a = post_vals["px_scale"][:, samp_a]
+        n_post_effective = h_a.shape[0]
+        w_a = softmax(w_a)
+        w_ab = w_a.T
+        dist_a = db.Categorical(probs=w_ab)
+        iw_select_a = dist_a.sample(sample_shape=(400,))
+        iw_select_a = iw_select_a.unsqueeze(1)  # index for original z shape
+        iw_select_a = iw_select_a.unsqueeze(-1)  # index for number of genes
+        iw_select_a = iw_select_a.expand((400, 1, len(samp_a), N_GENES))
+        h_a_orig = h_a.unsqueeze(0).expand(
+            (400, n_post_effective, len(samp_a), N_GENES)
         )
+        h_a_final = torch.gather(h_a_orig, dim=1, index=iw_select_a).squeeze(1)
+
+        w_b = post_vals["log_ratio"][:, samp_b]
+        h_b = post_vals["px_scale"][:, samp_b]
+        n_post_effective = h_b.shape[0]
+        w_b = softmax(w_b)
+        w_bb = w_b.T
+        dist_b = db.Categorical(probs=w_bb)
+        iw_select_b = dist_b.sample(sample_shape=(400,))
+        iw_select_b = iw_select_b.unsqueeze(1)  # index for original z shape
+        iw_select_b = iw_select_b.unsqueeze(-1)  # index for number of genes
+        iw_select_b = iw_select_b.expand((400, 1, len(samp_b), N_GENES))
+        h_b_orig = h_b.unsqueeze(0).expand(
+            (400, n_post_effective, len(samp_b), N_GENES)
+        )
+        h_b_final = torch.gather(h_b_orig, dim=1, index=iw_select_b).squeeze(1)
+
+        cells_a = np.random.choice(
+            np.arange(h_a_final.shape[1]), size=2 * h_a_final.shape[1]
+        )
+        cells_b = np.random.choice(
+            np.arange(h_b_final.shape[1]), size=2 * h_a_final.shape[1]
+        )
+
+        h_a_final = h_a_final[:, cells_a].log2()
+        h_b_final = h_b_final[:, cells_b].log2()
+
+        h_a_samp = torch.median(h_a_final, 1).values
+        h_b_samp = torch.median(h_b_final, 1).values
+
+        y_pred = h_a_samp - h_b_samp
         y_pred = (y_pred.abs() >= 0.5).float()
-        y_pred = y_pred.mean((0, 1))
+        y_pred = y_pred.mean(0)
+        return y_pred
+    else:
+        #  n_samples_posterior, n_cells, n_genes
+        h_a_samp = post_vals["px_scale"][:, samp_a].log2()
+        h_b_samp = post_vals["px_scale"][:, samp_b].log2()
+
+        h_a_samp = torch.median(h_a_samp, 1).values
+        h_b_samp = torch.median(h_b_samp, 1).values
+
+        y_pred = h_a_samp - h_b_samp
+        y_pred = (y_pred.abs() >= 0.5).float()
+        y_pred = y_pred.mean(0)
     return y_pred
 
 
@@ -294,6 +239,7 @@ def get_predictions_ais(post_a, post_b, model, schedule, n_latent, n_post_sample
 
     n_batch = z_a.shape[1]
     with torch.no_grad():
+        w_a = softmax(log_wa)
         log_h_a = (
             model.decoder(
                 model.dispersion,
@@ -303,8 +249,21 @@ def get_predictions_ais(post_a, post_b, model, schedule, n_latent, n_post_sample
             )[0]
             .log2()
             .cpu()
-            .view(n_post_samples, 1, n_batch, -1)
+            .view(n_post_samples, n_batch, -1)
         )
+        w_ab = w_a.T
+        n_post_effective = log_h_a.shape[0]
+        dist_a = db.Categorical(probs=w_ab)
+        iw_select_a = dist_a.sample(sample_shape=(400,))
+        iw_select_a = iw_select_a.unsqueeze(1)  # index for original z shape
+        iw_select_a = iw_select_a.unsqueeze(-1)  # index for number of genes
+        iw_select_a = iw_select_a.expand((400, 1, n_batch, N_GENES))
+        log_h_a_orig = log_h_a.unsqueeze(0).expand(
+            (400, n_post_effective, n_batch, N_GENES)
+        )
+        log_h_a_final = torch.gather(log_h_a_orig, dim=1, index=iw_select_a).squeeze(1)
+
+        w_b = softmax(log_wb)
         log_h_b = (
             model.decoder(
                 model.dispersion,
@@ -314,17 +273,31 @@ def get_predictions_ais(post_a, post_b, model, schedule, n_latent, n_post_sample
             )[0]
             .log2()
             .cpu()
-            .view(1, n_post_samples, n_batch, -1)
+            .view(n_post_samples, n_batch, -1)
         )
-        w_a = softmax(log_wa).view(n_post_samples, 1, n_batch, 1)
-        w_b = softmax(log_wb).view(1, n_post_samples, n_batch, 1)
+        # torch.Size([200, 1, 500, 100]) torch.Size([200, 500])
+        print(log_h_a.shape, log_wa.shape)
+        # original n_samples, n_batch
+        w_bb = w_b.T
+        n_post_effective = log_h_b.shape[0]
+        dist_b = db.Categorical(probs=w_bb)
+        iw_select_b = dist_b.sample(sample_shape=(400,))
+        iw_select_b = iw_select_b.unsqueeze(1)  # index for original z shape
+        iw_select_b = iw_select_b.unsqueeze(-1)  # index for number of genes
+        iw_select_b = iw_select_b.expand((400, 1, n_batch, N_GENES))
+        log_h_b_orig = log_h_b.unsqueeze(0).expand(
+            (400, n_post_effective, n_batch, N_GENES)
+        )
+        log_h_b_final = torch.gather(log_h_b_orig, dim=1, index=iw_select_b).squeeze(1)
 
-        y_pred_is = ((log_h_a - log_h_b).abs() >= 0.5).float()
-        y_pred_is = y_pred_is * w_a * w_b
-        y_pred_is = y_pred_is.sum([0, 1]).mean(0)
+        h_a_samp = torch.median(log_h_a_final, 1).values
+        h_b_samp = torch.median(log_h_b_final, 1).values
 
-    y_pred_is = y_pred_is.numpy()
-    return y_pred_is
+        y_pred = h_a_samp - h_b_samp
+        y_pred = (y_pred.abs() >= 0.5).float()
+        y_pred = y_pred.mean(0)
+    y_pred = y_pred.numpy()
+    return y_pred
 
 
 def fdr_score(y_true, y_pred):
@@ -341,14 +314,10 @@ def true_fdr(y_true, y_pred):
     """
     n_genes = len(y_true)
     probas_sorted = np.argsort(-y_pred)
-    true_fdr_array = np.zeros(n_genes)
-    for idx in range(1, len(probas_sorted) + 1):
-        y_pred_tresh = np.zeros(n_genes, dtype=bool)
-        where_pos = probas_sorted[:idx]
-        y_pred_tresh[where_pos] = True
-        # print(y_pred_tresh)
-        true_fdr_array[idx - 1] = fdr_score(y_true, y_pred_tresh)
-    return true_fdr_array
+    denom = np.arange(n_genes) + 1
+    num = np.cumsum(y_true[probas_sorted])
+    res = (denom - num) / denom
+    return res
 
 
 def posterior_expected_fdr(y_pred, fdr_target=0.05) -> tuple:
@@ -366,18 +335,15 @@ def posterior_expected_fdr(y_pred, fdr_target=0.05) -> tuple:
     return cumulative_fdr, is_pred_de
 
 
-def model_ais_evaluation_loop(trainer, n_latent):
-    schedule = np.linspace(0, 1, 20)
+def model_ais_evaluation_loop(
+    trainer, n_latent, schedule_n=20, n_picks=N_PICKS, n_cells=N_CELLS,
+):
+    schedule = np.linspace(0, 1, schedule_n)
     mdl = trainer.model
     train_post = trainer.train_set.sequential(batch_size=128)
-    _, logwa = ais_trajectory(
-        model=mdl, schedule=schedule, loader=train_post, n_sample=50, n_latent=n_latent,
-    )
-    iwelbo5000_train = (torch.logsumexp(logwa, dim=0) - np.log(logwa.shape[0])).mean()
-
     test_post = trainer.test_set.sequential(batch_size=128)
     _, logwa = ais_trajectory(
-        model=mdl, schedule=schedule, loader=test_post, n_sample=50, n_latent=n_latent,
+        model=mdl, schedule=schedule, loader=test_post, n_sample=200, n_latent=n_latent,
     )
     iwelbo5000 = (torch.logsumexp(logwa, dim=0) - np.log(logwa.shape[0])).mean()
 
@@ -386,13 +352,18 @@ def model_ais_evaluation_loop(trainer, n_latent):
     train_indices = train_post.indices
     y_train = Y[train_indices]
 
-    decision_rule_fdr10 = np.zeros(N_PICKS)
-    decision_rule_tpr10 = np.zeros(N_PICKS)
-    decision_rule_fdr10_plugin = np.zeros(N_PICKS)
-    decision_rule_tpr10_plugin = np.zeros(N_PICKS)
-    fdr_gt = np.zeros((N_GENES, N_PICKS))
-    pe_fdr = np.zeros((N_GENES, N_PICKS))
-    for ipick in range(N_PICKS):
+    decision_rule_fdr10 = np.zeros(n_picks)
+    decision_rule_fdr05 = np.zeros(n_picks)
+    decision_rule_fdr20 = np.zeros(n_picks)
+    decision_rule_tpr10 = np.zeros(n_picks)
+    fdr_gt = np.zeros((N_GENES, n_picks))
+    pe_fdr = np.zeros((N_GENES, n_picks))
+    fdr_gt_plugin = np.zeros((N_GENES, n_picks))
+    y_preds_is = np.zeros((N_GENES, n_picks))
+    y_gt = np.zeros((N_GENES, n_picks))
+
+    np.random.seed(42)
+    for ipick in range(n_picks):
         print(np.unique(y_train))
         if DO_POISSON:
             where_a = np.where(y_train == 0)[0]
@@ -401,34 +372,31 @@ def model_ais_evaluation_loop(trainer, n_latent):
             where_a = np.where(y_train == 1)[0]
             where_b = np.where(y_train == 2)[0]
 
-        samples_a = np.random.choice(where_a, size=N_CELLS)
-        samples_b = np.random.choice(where_b, size=N_CELLS)
+        samples_a = np.random.choice(where_a, size=n_cells)
+        samples_b = np.random.choice(where_b, size=n_cells)
 
+        # Option 1
+        # is_significant_de_local = IS_SIGNIFICANT_DE
+
+        # Option 2
         samples_a_overall = train_indices[samples_a]
         samples_b_overall = train_indices[samples_b]
-        # means_a = (
-        #     S_MAT[samples_a_overall]
-        #     * K_ON[samples_a_overall]
-        #     / (K_ON[samples_a_overall] + K_OFF[samples_a_overall])
-        # )
-        # means_b = (
-        #     S_MAT[samples_b_overall]
-        #     * K_ON[samples_b_overall]
-        #     / (K_ON[samples_b_overall] + K_OFF[samples_b_overall])
-        # )
-        # lfc_dist_gt = np.log2(means_a) - np.log2(means_b)
-        # is_significant_de_local = (np.abs(lfc_dist_gt) >= 0.5).mean(0) >= 0.5
-        is_significant_de_local = IS_SIGNIFICANT_DE
+
+        h_a = h[samples_a_overall]
+        h_b = h[samples_b_overall]
+        lfc_loc = h_a - h_b
+        is_significant_de_local = (lfc_loc.abs() >= 0.5).float().mean(0) >= 0.5
+        is_significant_de_local = is_significant_de_local.numpy()
 
         logging.info("IS flavor ...")
         schedule = np.linspace(0.0, 1.0, 100)
         post_a = trainer.create_posterior(
             model=mdl, gene_dataset=DATASET, indices=samples_a_overall
-        ).sequential(batch_size=5)
+        ).sequential(batch_size=32)
 
         post_b = trainer.create_posterior(
             model=mdl, gene_dataset=DATASET, indices=samples_b_overall
-        ).sequential(batch_size=5)
+        ).sequential(batch_size=32)
         y_pred_ais = get_predictions_ais(
             post_a, post_b, mdl, schedule, n_latent=n_latent, n_post_samples=200,
         )
@@ -447,22 +415,66 @@ def model_ais_evaluation_loop(trainer, n_latent):
         decision_rule_tpr10[ipick] = tpr_score(
             y_true=is_significant_de_local, y_pred=y_decision_rule10
         )
-        return dict(
-            iwelbo5000=np.array(iwelbo5000),
-            iwelbo5000_train=np.array(iwelbo5000_train),
-            all_fdr_gt=np.array(fdr_gt),
-            all_pe_fdr=np.array(pe_fdr),
-            fdr_controlled_fdr10=np.array(decision_rule_fdr10),
-            fdr_controlled_tpr10=np.array(decision_rule_tpr10),
-            fdr_controlled_fdr10_plugin=None,
-            fdr_controlled_tpr10_plugin=None,
-            khat_10000=None,
-            ess=None,
+
+        _, decision_rule_fdr05 = posterior_expected_fdr(
+            y_pred=y_pred_ais, fdr_target=0.05
         )
+        decision_rule_fdr05[ipick] = fdr_score(
+            y_true=is_significant_de_local, y_pred=y_decision_rule10
+        )
+        _, decision_rule_fdr20 = posterior_expected_fdr(
+            y_pred=y_pred_ais, fdr_target=0.2
+        )
+        decision_rule_fdr20[ipick] = fdr_score(
+            y_true=is_significant_de_local, y_pred=y_decision_rule10
+        )
+
+        y_preds_is[:, ipick] = y_pred_ais
+        y_gt[:, ipick] = is_significant_de_local
+
+    prauc_is = np.array(
+        [prauc(y=y_it, pred=y_pred) for (y_it, y_pred) in zip(y_gt.T, y_preds_is.T)]
+    )
+    all_fdr_gt = np.array(fdr_gt)
+    all_pe_fdr = np.array(pe_fdr)
+    fdr_gt_plugin = np.array(fdr_gt_plugin)
+    fdr_diff = all_fdr_gt - all_pe_fdr
+    return dict(
+        iwelbo5000=np.array(iwelbo5000),
+        iwelbo5000_train=None,
+        pe_fdr_plugin=None,
+        fdr_gt_plugin=fdr_gt_plugin,
+        all_fdr_gt=all_fdr_gt,
+        all_pe_fdr=all_pe_fdr,
+        l1_fdr=np.linalg.norm(fdr_diff, axis=0, ord=1),
+        l2_fdr=np.linalg.norm(fdr_diff, axis=0, ord=2),
+        y_gt=y_gt,
+        y_pred_is=y_preds_is,
+        y_pred_plugin=None,
+        prauc_plugin=None,
+        prauc_is=prauc_is,
+        fdr_controlled_fdr10=np.array(decision_rule_fdr10),
+        fdr_controlled_fdr05=np.array(decision_rule_fdr05),
+        fdr_controlled_fdr20=np.array(decision_rule_fdr20),
+        fdr_controlled_tpr10=np.array(decision_rule_tpr10),
+        fdr_controlled_fdr10_plugin=None,
+        fdr_controlled_tpr10_plugin=None,
+        khat_10000=None,
+        lfc_gt=lfc_loc,
+        ess=None,
+    )
 
 
 def model_evaluation_loop(
-    trainer, eval_encoder, counts_eval, encoder_eval_name,
+    trainer,
+    eval_encoder,
+    counts_eval,
+    encoder_eval_name,
+    n_iwsamples=5000,
+    n_picks=N_PICKS,
+    n_cells=N_CELLS,
+    do_observed_library=True,
+    n_samples_queries=200,
 ):
     test_post = trainer.test_set.sequential()
     mdl = trainer.model
@@ -472,13 +484,15 @@ def model_evaluation_loop(
     logging.info("IWELBO 5K estimation...")
     multicounts_eval = None
     if counts_eval is not None:
-        multicounts_eval = (5000 / counts_eval.sum()) * counts_eval
+        multicounts_eval = (n_iwsamples / counts_eval.sum()) * counts_eval
+        multicounts_eval = multicounts_eval.astype(int)
+        print(multicounts_eval)
     iwelbo5000_loss = (
         test_post.getter(
             keys=["IWELBO"],
-            n_samples=5000,
+            n_samples=n_iwsamples,
             batch_size=64,
-            do_observed_library=True,
+            do_observed_library=do_observed_library,
             encoder_key=encoder_eval_name,
             counts=multicounts_eval,
             z_encoder=eval_encoder,
@@ -490,9 +504,9 @@ def model_evaluation_loop(
     iwelbo5000train_loss = (
         train_post.getter(
             keys=["IWELBO"],
-            n_samples=5000,
+            n_samples=n_iwsamples,
             batch_size=64,
-            do_observed_library=True,
+            do_observed_library=do_observed_library,
             encoder_key=encoder_eval_name,
             counts=multicounts_eval,
             z_encoder=eval_encoder,
@@ -502,14 +516,17 @@ def model_evaluation_loop(
     ).mean()
 
     # *** KHAT
-    multicounts = None
+    multicounts_eval = None
     if counts_eval is not None:
-        multicounts = (5000 / counts_eval.sum()) * counts_eval
+        multicounts_eval = (n_iwsamples / counts_eval.sum()) * counts_eval
+        multicounts_eval = multicounts_eval.astype(int)
     log_ratios = []
     n_samples_total = 1e4
-    n_samples_per_pass = 25 if encoder_eval_name == "default" else multicounts.sum()
+    n_samples_per_pass = (
+        300 if encoder_eval_name == "default" else multicounts_eval.sum()
+    )
     n_iter = int(n_samples_total / n_samples_per_pass)
-    logging.info("Multicounts: {}".format(multicounts))
+    logging.info("Multicounts: {}".format(multicounts_eval))
     logging.info(
         "Khat computation using {} samples".format(n_samples_per_pass * n_iter)
     )
@@ -524,7 +541,7 @@ def model_evaluation_loop(
                 reparam=False,
                 encoder_key=encoder_eval_name,
                 counts=multicounts_eval,
-                do_observed_library=True,
+                do_observed_library=do_observed_library,
                 z_encoder=eval_encoder,
             )
         out = out["log_ratio"].cpu()
@@ -540,13 +557,22 @@ def model_evaluation_loop(
     train_indices = train_post.indices
     y_train = Y[train_indices]
 
-    decision_rule_fdr10 = np.zeros(N_PICKS)
-    decision_rule_tpr10 = np.zeros(N_PICKS)
-    decision_rule_fdr10_plugin = np.zeros(N_PICKS)
-    decision_rule_tpr10_plugin = np.zeros(N_PICKS)
-    fdr_gt = np.zeros((N_GENES, N_PICKS))
-    pe_fdr = np.zeros((N_GENES, N_PICKS))
-    for ipick in range(N_PICKS):
+    decision_rule_fdr10 = np.zeros(n_picks)
+    decision_rule_fdr05 = np.zeros(n_picks)
+    decision_rule_fdr20 = np.zeros(n_picks)
+    decision_rule_tpr10 = np.zeros(n_picks)
+    decision_rule_fdr10_plugin = np.zeros(n_picks)
+    decision_rule_tpr10_plugin = np.zeros(n_picks)
+    fdr_gt = np.zeros((N_GENES, n_picks))
+    pe_fdr = np.zeros((N_GENES, n_picks))
+    fdr_gt_plugin = np.zeros((N_GENES, n_picks))
+    pe_fdr_plugin = np.zeros((N_GENES, n_picks))
+    y_preds_is = np.zeros((N_GENES, n_picks))
+    y_preds_plugin = np.zeros((N_GENES, n_picks))
+    y_gt = np.zeros((N_GENES, n_picks))
+
+    np.random.seed(42)
+    for ipick in range(n_picks):
         print(np.unique(y_train))
         if DO_POISSON:
             where_a = np.where(y_train == 0)[0]
@@ -555,38 +581,35 @@ def model_evaluation_loop(
             where_a = np.where(y_train == 1)[0]
             where_b = np.where(y_train == 2)[0]
 
-        samples_a = np.random.choice(where_a, size=N_CELLS)
-        samples_b = np.random.choice(where_b, size=N_CELLS)
+        samples_a = np.random.choice(where_a, size=n_cells)
+        samples_b = np.random.choice(where_b, size=n_cells)
+
+        # Option 1
+        # is_significant_de_local = IS_SIGNIFICANT_DE
 
         samples_a_overall = train_indices[samples_a]
         samples_b_overall = train_indices[samples_b]
 
-        # means_a = (
-        #     S_MAT[samples_a_overall]
-        #     * K_ON[samples_a_overall]
-        #     / (K_ON[samples_a_overall] + K_OFF[samples_a_overall])
-        # )
-        # means_b = (
-        #     S_MAT[samples_b_overall]
-        #     * K_ON[samples_b_overall]
-        #     / (K_ON[samples_b_overall] + K_OFF[samples_b_overall])
-        # )
-        # lfc_dist_gt = np.log2(means_a) - np.log2(means_b)
-        # is_significant_de_local = (np.abs(lfc_dist_gt) >= 0.5).mean(0) >= 0.5
-        is_significant_de_local = IS_SIGNIFICANT_DE
+        h_a = h[samples_a_overall]
+        h_b = h[samples_b_overall]
+        lfc_loc = h_a - h_b
+        is_significant_de_local = (lfc_loc.abs() >= 0.5).float().mean(0) >= 0.5
+        is_significant_de_local = is_significant_de_local.numpy()
 
         logging.info("IS flavor ...")
         multicounts_eval = None
         if counts_eval is not None:
-            multicounts_eval = (200 / counts_eval.sum()) * counts_eval
+            multicounts_eval = (n_samples_queries / counts_eval.sum()) * counts_eval
+            multicounts_eval = multicounts_eval.astype(int)
         y_pred_is = get_predictions(
             train_post,
             samples_a,
             samples_b,
             encoder_key=encoder_eval_name,
             counts=multicounts_eval,
-            n_post_samples=200,
+            n_post_samples=n_samples_queries,
             importance_sampling=True,
+            do_observed_library=do_observed_library,
             encoder=eval_encoder,
         )
         y_pred_is = y_pred_is.numpy()
@@ -605,6 +628,19 @@ def model_evaluation_loop(
             y_true=is_significant_de_local, y_pred=y_decision_rule10
         )
 
+        _, decision_rule_fdr05 = posterior_expected_fdr(
+            y_pred=y_pred_is, fdr_target=0.05
+        )
+        decision_rule_fdr05[ipick] = fdr_score(
+            y_true=is_significant_de_local, y_pred=y_decision_rule10
+        )
+        _, decision_rule_fdr20 = posterior_expected_fdr(
+            y_pred=y_pred_is, fdr_target=0.2
+        )
+        decision_rule_fdr20[ipick] = fdr_score(
+            y_true=is_significant_de_local, y_pred=y_decision_rule10
+        )
+
         logging.info("Plugin flavor ...")
         y_pred_plugin = get_predictions(
             train_post,
@@ -612,13 +648,20 @@ def model_evaluation_loop(
             samples_b,
             encoder_key=encoder_eval_name,
             counts=multicounts_eval,
-            n_post_samples=200,
+            n_post_samples=n_samples_queries,
             importance_sampling=False,
+            do_observed_library=do_observed_library,
             encoder=eval_encoder,
         )
         y_pred_plugin = y_pred_plugin.numpy()
-        true_fdr_arr = true_fdr(y_true=is_significant_de_local, y_pred=y_pred_plugin)
-
+        true_fdr_plugin_arr = true_fdr(
+            y_true=is_significant_de_local, y_pred=y_pred_plugin
+        )
+        fdr_gt_plugin[:, ipick] = true_fdr_plugin_arr
+        pe_fdr_plugin_arr, y_decision_rule = posterior_expected_fdr(
+            y_pred=y_pred_plugin
+        )
+        pe_fdr_plugin[:, ipick] = pe_fdr_plugin_arr
         _, y_decision_rule10 = posterior_expected_fdr(
             y_pred=y_pred_plugin, fdr_target=0.1
         )
@@ -628,17 +671,44 @@ def model_evaluation_loop(
         decision_rule_tpr10_plugin[ipick] = tpr_score(
             y_true=is_significant_de_local, y_pred=y_decision_rule10
         )
+        y_preds_is[:, ipick] = y_pred_is
+        y_preds_plugin[:, ipick] = y_pred_plugin
+        y_gt[:, ipick] = is_significant_de_local
 
+    prauc_plugin = np.array(
+        [prauc(y=y_it, pred=y_pred) for (y_it, y_pred) in zip(y_gt.T, y_preds_plugin.T)]
+    )
+
+    # prauc_is = None
+    prauc_is = np.array(
+        [prauc(y=y_it, pred=y_pred) for (y_it, y_pred) in zip(y_gt.T, y_preds_is.T)]
+    )
+    all_fdr_gt = np.array(fdr_gt)
+    all_pe_fdr = np.array(pe_fdr)
+    fdr_gt_plugin = np.array(fdr_gt_plugin)
+    fdr_diff = all_fdr_gt - all_pe_fdr
     loop_res = dict(
         iwelbo5000=np.array(iwelbo5000_loss),
         iwelbo5000_train=np.array(iwelbo5000train_loss),
-        all_fdr_gt=np.array(fdr_gt),
-        all_pe_fdr=np.array(pe_fdr),
+        pe_fdr_plugin=pe_fdr_plugin,
+        fdr_gt_plugin=fdr_gt_plugin,
+        all_fdr_gt=all_fdr_gt,
+        all_pe_fdr=all_pe_fdr,
+        l1_fdr=np.linalg.norm(fdr_diff, axis=0, ord=1),
+        l2_fdr=np.linalg.norm(fdr_diff, axis=0, ord=2),
+        y_gt=y_gt,
+        y_pred_is=y_preds_is,
+        y_pred_plugin=y_preds_plugin,
+        prauc_plugin=prauc_plugin,
+        prauc_is=prauc_is,
         fdr_controlled_fdr10=np.array(decision_rule_fdr10),
+        fdr_controlled_fdr05=np.array(decision_rule_fdr05),
+        fdr_controlled_fdr20=np.array(decision_rule_fdr20),
         fdr_controlled_tpr10=np.array(decision_rule_tpr10),
         fdr_controlled_fdr10_plugin=np.array(decision_rule_fdr10_plugin),
         fdr_controlled_tpr10_plugin=np.array(decision_rule_tpr10_plugin),
         khat_10000=np.array(khats),
+        lfc_gt=lfc_loc,
         ess=ess_here.numpy(),
     )
     return loop_res
