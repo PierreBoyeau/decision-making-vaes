@@ -8,7 +8,6 @@ import logging
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
-import neptune
 import numpy as np
 import pandas as pd
 import torch
@@ -222,9 +221,7 @@ for dic in scenarios:
                 eval_encoder = None
                 multi_counts_eval = None
                 if counts is not None:
-                    multi_counts_eval = (
-                        (5000 / counts.sum()) * counts
-                    ).astype(int)
+                    multi_counts_eval = ((5000 / counts.sum()) * counts).astype(int)
                 encoder_eval_name = losses_wvar
             else:
                 logging.info(
@@ -301,16 +298,6 @@ for dic in scenarios:
             df_res = pd.DataFrame(df)
             # df_res.to_csv("{}.csv".format(FILENAME), sep="\t")
             df_res.to_pickle("{}.pkl".format(FILENAME))
-
-            # with neptune.create_experiment(
-            #     name="{}_{}".format(model_name, eval_encoder_name),
-            #     params={**setup_loop},
-            #     upload_source_files=["simu_cross_gaussian_with_defensive_refactor.py"],
-            # ):
-            #     neptune.log_metric("IWELBO", res_eval_loop["IWELBO"])
-            #     neptune.log_metric("KHAT", res_eval_loop["KHAT"].mean())
-            #     neptune.log_metric("exact_lls_test", res_eval_loop["exact_lls_test"])
-            #     neptune.log_metric("a2_norm", res_eval_loop["a2_norm"])
 
             modules = None
             eval_encoder = None

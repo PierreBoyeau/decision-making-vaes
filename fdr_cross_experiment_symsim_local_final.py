@@ -719,7 +719,6 @@ def model_evaluation_loop(
 
 
 import logging
-import neptune
 import pandas as pd
 import torch
 import torch.nn as nn
