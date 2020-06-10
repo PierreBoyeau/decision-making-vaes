@@ -4,6 +4,7 @@ import time
 
 import matplotlib.pyplot as plt
 import torch
+import pandas as pd
 from tqdm import trange
 
 from . import Trainer
@@ -180,84 +181,45 @@ class UnsupervisedTrainer(Trainer):
                     ) = tensors_list[0]
 
                     # wake theta update
-                    if self.iter % n_every_theta == 0:
-                        self.model.z_encoder.eval()
-                        elbo = self.model(
-                            sample_batch,
-                            local_l_mean,
-                            local_l_var,
-                            batch_index,
-                            loss_type=wake_theta,
-                            n_samples=n_samples_theta,
-                            do_observed_library=do_observed_library,
-                        )
-                        loss = torch.mean(elbo)
-                        optimizer_gen.zero_grad()
-                        loss.backward()
-                        optimizer_gen.step()
+                    elbo = self.model(
+                        sample_batch,
+                        local_l_mean,
+                        local_l_var,
+                        batch_index,
+                        loss_type=wake_theta,
+                        n_samples=n_samples_theta,
+                        do_observed_library=do_observed_library,
+                    )
+                    loss = torch.mean(elbo)
+                    optimizer_gen.zero_grad()
+                    loss.backward()
+                    optimizer_gen.step()
 
                     if self.iter % 100 == 0:
                         self.metrics["train_theta_wake"].append(loss.item())
 
                     # wake phi update
                     # Wake phi
-                    if wake_psi == "REVKL+CUBO":
-                        if self.epoch <= n_warmup:
-                            wake_psi_epoch = "REVKL"
-                            reparam_epoch = False
-                        else:
-                            wake_psi_epoch = "CUBO"
-                            reparam_epoch = True
-                    elif wake_psi == "ELBO+CUBO":
-                        reparam_epoch = True
-                        if self.epoch <= n_warmup:
-                            wake_psi_epoch = "ELBO"
-                        else:
-                            wake_psi_epoch = "CUBO"
-                    elif wake_psi == "ELBO+REVKL":
-                        if self.epoch <= n_warmup:
-                            wake_psi_epoch = "ELBO"
-                            reparam_epoch = True
-                        else:
-                            wake_psi_epoch = "REVKL"
-                            reparam_epoch = False
+                    wake_psi_epoch = wake_psi
+                    reparam_epoch = reparam
 
-                    else:
-                        wake_psi_epoch = wake_psi
-                        reparam_epoch = reparam
-
-                    if self.iter % n_every_phi == 0:
-                        self.model.z_encoder.train()
-                        loss = self.model(
-                            sample_batch,
-                            local_l_mean,
-                            local_l_var,
-                            batch_index,
-                            loss_type=wake_psi_epoch,
-                            n_samples=n_samples_phi,
-                            reparam=reparam_epoch,
-                            do_observed_library=do_observed_library,
-                        )
-                        loss = torch.mean(loss)
-                        optimizer_var_wake.zero_grad()
-                        loss.backward()
-                        optimizer_var_wake.step()
+                    loss = self.model(
+                        sample_batch,
+                        local_l_mean,
+                        local_l_var,
+                        batch_index,
+                        loss_type=wake_psi_epoch,
+                        n_samples=n_samples_phi,
+                        reparam=reparam_epoch,
+                        do_observed_library=do_observed_library,
+                    )
+                    loss = torch.mean(loss)
+                    optimizer_var_wake.zero_grad()
+                    loss.backward()
+                    optimizer_var_wake.step()
 
                     if self.iter % 100 == 0:
                         self.metrics["train_phi_wake"].append(loss.item())
-                    # # Sleep phi update
-                    # synthetic_obs = self.model.generate_new_obs(
-                    #     sample_batch,
-                    #     batch_index=batch_index,
-                    # )
-                    #
-                    # loss = self.mod
-
-                    # if self.iter % 100 == 0:
-                    #     other_metrics = self.test_set.sequential().getter(
-                    #         keys=["CUBO"], n_samples=10
-                    #     )
-                    #     self.metrics["train_cubo"].append(other_metrics["CUBO"].mean())
 
                     self.iter += 1
 
@@ -421,23 +383,24 @@ class UnsupervisedTrainer(Trainer):
     def train_eval_defensive_encoder(
         self,
         eval_encoder,
+        counts: pd.Series,
         n_epochs=20,
         lr=1e-3,
         eps=0.01,
         n_samples_phi=1,
-        counts=torch.tensor([8, 8, 2]),
     ):
+        reparam_map = dict(IWELBO=True, REVKL=False, ELBO=True, CUBO=True,)
         self.model.eval()
         self.compute_metrics_time = 0
         self.n_epochs = n_epochs
-        params_var_cubo = filter(
-            lambda p: p.requires_grad, list(eval_encoder["CUBO"].parameters())
-        )
-        params_var_eubo = filter(
-            lambda p: p.requires_grad, list(eval_encoder["EUBO"].parameters())
-        )
-        optimizer_var_cubo = torch.optim.Adam(params_var_cubo, lr=lr, eps=eps)
-        optimizer_var_eubo = torch.optim.Adam(params_var_eubo, lr=lr, eps=eps)
+
+        enc_keys = [key for key in counts.index.values if key != "prior"]
+        params_vars = {
+            key: filter(lambda p: p.requires_grad, list(eval_encoder[key].parameters()))
+            for key in enc_keys
+        }
+        optimizers = {key: torch.optim.Adam(params_vars[key]) for key in enc_keys}
+
         with trange(
             n_epochs, desc="training", file=sys.stdout, disable=self.verbose
         ) as pbar:
@@ -453,40 +416,24 @@ class UnsupervisedTrainer(Trainer):
                         _,
                     ) = tensors_list[0]
 
-                    loss = self.model(
-                        sample_batch,
-                        local_l_mean,
-                        local_l_var,
-                        batch_index,
-                        loss_type="CUBO",
-                        n_samples=n_samples_phi,
-                        reparam=True,
-                        encoder_key="CUBO",
-                        do_observed_library=True,
-                        z_encoder=eval_encoder,
-                    )
-                    loss = torch.mean(loss)
-                    optimizer_var_cubo.zero_grad()
-                    loss.backward()
-                    optimizer_var_cubo.step()
-
-                    loss = self.model(
-                        sample_batch,
-                        local_l_mean,
-                        local_l_var,
-                        batch_index,
-                        loss_type="REVKL",
-                        n_samples=n_samples_phi,
-                        reparam=False,
-                        encoder_key="EUBO",
-                        do_observed_library=True,
-                        z_encoder=eval_encoder,
-                    )
-                    loss = torch.mean(loss)
-                    optimizer_var_eubo.zero_grad()
-                    loss.backward()
-                    optimizer_var_eubo.step()
-                    self.iter += 1
+                    for key in enc_keys:
+                        loss = self.model(
+                            sample_batch,
+                            local_l_mean,
+                            local_l_var,
+                            batch_index,
+                            loss_type=key,
+                            n_samples=n_samples_phi,
+                            reparam=reparam_map[key],
+                            encoder_key=key,
+                            do_observed_library=True,
+                            z_encoder=eval_encoder,
+                        )
+                        loss = torch.mean(loss)
+                        optimizers[key].zero_grad()
+                        loss.backward()
+                        optimizers[key].step()
+                        self.iter += 1
 
                 if not self.on_epoch_end():
                     break

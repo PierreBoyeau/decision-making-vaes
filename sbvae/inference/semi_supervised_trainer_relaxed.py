@@ -16,17 +16,21 @@ from sbvae.models import SemiSupervisedVAE
 logger = logging.getLogger(__name__)
 
 
-class MnistTrainer:
+class MnistRTrainer:
     def __init__(
         self,
         dataset: MnistDataset,
         model: SemiSupervisedVAE,
         batch_size: int = 128,
         classify_mode: str = "vanilla",
+        r: float = 5e-4,
         use_cuda=True,
         save_metrics=False,
+        debug_gradients=False,
     ):
         self.classify_mode = classify_mode
+        self.r = r
+        self.debug_gradients = debug_gradients
         self.dataset = dataset
         self.model = model
         self.train_loader = DataLoader(
@@ -48,6 +52,7 @@ class MnistTrainer:
             pin_memory=use_cuda,
         )
         self.cross_entropy_fn = CrossEntropyLoss()
+        self.it = 0
 
         self.save_metrics = save_metrics
         self.iterate = 0
@@ -58,7 +63,15 @@ class MnistTrainer:
             train_loss=[],
             classification_loss=[],
             train_cubo=[],
+            classification_gradients=[],
         )
+
+    @property
+    def temperature(self):
+        t_ref = self.it - (self.it % 500)
+        t_ref = t_ref * self.r
+        t_ref = np.exp(-t_ref)
+        return np.maximum(0.5, t_ref)
 
     def train(
         self,
@@ -95,45 +108,31 @@ class MnistTrainer:
             optim = Adam(params, lr=lr)
             logger.info("Monobjective using {} loss".format(overall_loss))
         else:
-            if not z2_with_elbo:
-                params_gen = filter(
-                    lambda p: p.requires_grad,
-                    list(self.model.decoder_z1_z2.parameters())
-                    + list(self.model.x_decoder.parameters()),
-                )
-                optim_gen = Adam(params_gen, lr=lr)
+            params_gen = filter(
+                lambda p: p.requires_grad,
+                list(self.model.decoder_z1_z2.parameters())
+                + list(self.model.x_decoder.parameters()),
+            )
+            optim_gen = Adam(params_gen, lr=lr)
 
-                params_var = filter(
-                    lambda p: p.requires_grad,
-                    list(self.model.classifier.parameters())
-                    + list(self.model.encoder_z1.parameters())
-                    + list(self.model.encoder_z2_z1.parameters()),
-                )
-
-            else:
-                params_gen = filter(
-                    lambda p: p.requires_grad,
-                    list(self.model.decoder_z1_z2.parameters())
-                    + list(self.model.x_decoder.parameters())
-                    + list(self.model.encoder_z2_z1.parameters()),
-                )
-                optim_gen = Adam(params_gen, lr=lr)
-
-                params_var = filter(
-                    lambda p: p.requires_grad,
-                    list(self.model.classifier.parameters())
-                    + list(self.model.encoder_z1.parameters()),
-                )
+            params_var = filter(
+                lambda p: p.requires_grad,
+                list(self.model.classifier.parameters())
+                + list(self.model.encoder_z1.parameters())
+                + list(self.model.encoder_z2_z1.parameters()),
+            )
 
             optim_var_wake = Adam(params_var, lr=lr)
             logger.info(
                 "Multiobjective training using {} / {}".format(wake_theta, wake_psi)
             )
 
-        for epoch in tqdm(range(n_epochs)):
+        pbar = tqdm(range(n_epochs))
+        for epoch in pbar:
             for (tensor_all, tensor_superv) in zip(
                 self.train_loader, cycle(self.train_annotated_loader)
             ):
+                self.it += 1
 
                 x_u, _ = tensor_all
                 x_s, y_s = tensor_superv
@@ -156,7 +155,7 @@ class MnistTrainer:
                     optim.zero_grad()
                     loss.backward()
                     optim.step()
-                    torch.cuda.synchronize()
+                    # torch.cuda.synchronize()
 
                     if self.iterate % 100 == 0:
                         self.metrics["train_loss"].append(loss.item())
@@ -175,10 +174,10 @@ class MnistTrainer:
                     optim_gen.zero_grad()
                     theta_loss.backward()
                     optim_gen.step()
-                    torch.cuda.synchronize()
+                    # torch.cuda.synchronize()
 
-                    # if self.iterate % 100 == 0:
-                    #     self.metrics["train_theta_wake"].append(theta_loss.item())
+                    if self.iterate % 100 == 0:
+                        self.metrics["train_theta_wake"].append(theta_loss.item())
 
                     reparam_epoch = reparam_wphi
                     wake_psi_epoch = wake_psi
@@ -196,11 +195,18 @@ class MnistTrainer:
                     optim_var_wake.zero_grad()
                     psi_loss.backward()
                     optim_var_wake.step()
-                    torch.cuda.synchronize()
+                    # torch.cuda.synchronize()
                     if self.iterate % 100 == 0:
                         self.metrics["train_phi_wake"].append(psi_loss.item())
+                        if self.debug_gradients:
+                            self.metrics["classification_gradients"].append(
+                                self.model.classifier["default"]
+                                .classifier[0]
+                                .to_hidden.weight.grad.cpu()
+                            )
 
                 self.iterate += 1
+            pbar.set_description("{0:.2f}".format(theta_loss.item()))
 
     def train_eval_encoder(
         self,
@@ -213,7 +219,12 @@ class MnistTrainer:
         reparam_wphi: bool = True,
     ):
         reparam_mapper = dict(
-            default=reparam_wphi, ELBO=True, CUBO=True, REVKL=False, IWELBO=True,
+            default=reparam_wphi,
+            ELBO=True,
+            CUBO=True,
+            REVKL=False,
+            IWELBO=True,
+            IWELBOC=True,
         )
 
         logger.info(
@@ -288,7 +299,7 @@ class MnistTrainer:
                     optim_vars[key].zero_grad()
                     psi_loss.backward()
                     optim_vars[key].step()
-                    torch.cuda.synchronize()
+                    # torch.cuda.synchronize()
                     self.iterate += 1
 
     def train_defensive(
@@ -302,7 +313,9 @@ class MnistTrainer:
         classification_ratio: float = 50.0,
         update_mode: str = "all",
     ):
-        reparams_info = dict(CUBO=True, IWELBO=True, ELBO=True, CUBOB=True, REVKL=False)
+        reparams_info = dict(
+            CUBO=True, IWELBO=True, IWELBOC=True, ELBO=True, CUBOB=True, REVKL=False
+        )
         assert update_mode in ["all", "alternate"]
 
         params_gen = filter(
@@ -350,7 +363,6 @@ class MnistTrainer:
                 optim_gen.zero_grad()
                 theta_loss.backward()
                 optim_gen.step()
-                # torch.cuda.synchronize()
 
                 # if self.iterate % 100 == 0:
                 #     self.metrics["train_theta_wake"].append(theta_loss.item())
@@ -370,37 +382,6 @@ class MnistTrainer:
                     optim_vars[key].zero_grad()
                     var_loss.backward()
                     optim_vars[key].step()
-
-                    # psi_cubo_loss = self.loss(
-                    #     x_u=x_u,
-                    #     x_s=x_s,
-                    #     y_s=y_s,
-                    #     loss_type=cubo_wake_psi,
-                    #     n_samples=n_samples_phi,
-                    #     reparam=True,
-                    #     classification_ratio=classification_ratio,
-                    #     encoder_key="CUBO",
-                    # )
-                    # optim_cubo_var.zero_grad()
-                    # psi_cubo_loss.backward()
-                    # optim_cubo_var.step()
-                    # # torch.cuda.synchronize()
-
-                    # psi_eubo_loss = self.loss(
-                    #     x_u=x_u,
-                    #     x_s=x_s,
-                    #     y_s=y_s,
-                    #     loss_type=eubo_wake_psi,
-                    #     n_samples=n_samples_phi,
-                    #     reparam=False,
-                    #     classification_ratio=classification_ratio,
-                    #     encoder_key="EUBO",
-                    # )
-                    # optim_eubo_var.zero_grad()
-                    # psi_eubo_loss.backward()
-                    # optim_eubo_var.step()
-                    # # torch.cuda.synchronize()
-
             self.iterate += 1
 
     def loss(
@@ -416,7 +397,7 @@ class MnistTrainer:
         encoder_key="default",
         counts=None,
     ):
-
+        temp = self.temperature
         labelled_fraction = self.dataset.labelled_fraction
         s_every = int(1 / labelled_fraction)
 
@@ -424,6 +405,7 @@ class MnistTrainer:
             outs_s = None
             l_u = self.model.forward(
                 x_u,
+                temperature=temp,
                 loss_type=loss_type,
                 n_samples=n_samples,
                 reparam=reparam,
@@ -432,6 +414,7 @@ class MnistTrainer:
             )
             l_s = self.model.forward(
                 x_s,
+                temperature=temp,
                 loss_type=loss_type,
                 y=y_s,
                 n_samples=n_samples,
@@ -439,7 +422,7 @@ class MnistTrainer:
                 encoder_key=encoder_key,
                 counts=counts,
             )
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
             l_s = labelled_fraction * l_s
             j = l_u.mean() + l_s.mean()
         elif mode == "alternate":
@@ -447,6 +430,7 @@ class MnistTrainer:
             if self.iterate % s_every == 0:
                 l_s = self.model.forward(
                     x_s,
+                    temperature=temp,
                     loss_type=loss_type,
                     y=y_s,
                     n_samples=n_samples,
@@ -458,6 +442,7 @@ class MnistTrainer:
             else:
                 l_u = self.model.forward(
                     x_u,
+                    temperature=temp,
                     loss_type=loss_type,
                     n_samples=n_samples,
                     reparam=reparam,
@@ -493,12 +478,6 @@ class MnistTrainer:
         if self.save_metrics:
             if self.iterate % 100 == 0:
                 self.metrics["classification_loss"].append(l_class.item())
-
-                other_metrics = self.inference(
-                    self.train_loader, keys=["CUBO"], n_samples=10
-                )
-                self.metrics["train_cubo"].append(other_metrics["CUBO"].mean())
-
         return loss
 
     @torch.no_grad()
@@ -523,12 +502,23 @@ class MnistTrainer:
             y = y.to("cuda")
             if not do_supervised:
                 res = self.model.inference(
-                    x, n_samples=n_samples, encoder_key=encoder_key, counts=counts
+                    x,
+                    n_samples=n_samples,
+                    encoder_key=encoder_key,
+                    counts=counts,
+                    temperature=0.5,
+                    reparam=False,
                 )
             else:
                 raise ValueError("Not sure")
                 res = self.model.inference(
-                    x, y=y, n_samples=n_samples, encoder_key=encoder_key, counts=counts
+                    x,
+                    y=y,
+                    n_samples=n_samples,
+                    encoder_key=encoder_key,
+                    counts=counts,
+                    temperature=0.5,
+                    reparam=False,
                 )
             res["y"] = y
             if keys is not None:

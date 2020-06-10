@@ -311,15 +311,14 @@ class GaussianDefensiveTrainer(Trainer):
         n_epochs=20,
         lr=1e-3,
         eps=0.01,
-        eval_encoders: dict = None,
         z_encoder: nn.Module = None,
         counts=None,
         n_samples_theta: int = None,
         n_samples_phi: int = None,
     ):
         print("train with custom encoder {}".format(z_encoder is not None))
-        params_gen, params_wvar, _ = params
-        loss_gen, losses_wvar, _ = losses
+        my_params_gen, my_params_wvar, _ = params
+        my_loss_gen, my_losses_wvar, _ = losses
         begin = time.time()
         self.model.train()
         self.custom_metrics = dict(
@@ -327,13 +326,13 @@ class GaussianDefensiveTrainer(Trainer):
         )
         optimizers = dict()
 
-        if params_gen is not None:
+        if my_params_gen is not None:
             print("WAKE UPDATE GENERATIVE MODEL")
-            optimizers["theta"] = torch.optim.Adam(params_gen, lr=lr, eps=eps)
-        print("TRAIN WITH {}".format(losses_wvar))
-        for enc_loss_key in losses_wvar:
+            optimizers["theta"] = torch.optim.Adam(my_params_gen, lr=lr, eps=eps)
+        print("TRAIN WITH {}".format(my_losses_wvar))
+        for enc_loss_key in my_losses_wvar:
             optimizers[enc_loss_key] = torch.optim.Adam(
-                params_wvar[enc_loss_key], lr=lr, eps=eps
+                my_params_wvar[enc_loss_key], lr=lr, eps=eps
             )
 
         self.compute_metrics_time = 0
@@ -347,15 +346,32 @@ class GaussianDefensiveTrainer(Trainer):
                 self.on_epoch_begin()
                 pbar.update(1)
 
-                if params_gen is not None:
-                    # WAKE PHASE for generative model
-                    for tensors_list in self.data_loaders_loop():
-                        data_tensor = torch.stack(*tensors_list, 0)
+                # if my_params_gen is not None:
+                #     # WAKE PHASE for generative model
+                #     for tensors_list in self.data_loaders_loop():
+                #         data_tensor = torch.stack(*tensors_list, 0)
+                #         loss = torch.mean(
+                #             self.model(
+                #                 data_tensor,
+                #                 my_loss_gen,
+                #                 encoder_key=my_losses_wvar,
+                #                 n_samples_mc=n_samples_theta,
+                #                 counts=counts,
+                #                 z_encoder=z_encoder,
+                #             )
+                #         )
+                #         optimizers["theta"].zero_grad()
+                #         loss.backward()
+                #         optimizers["theta"].step()
+
+                for tensors_list in self.data_loaders_loop():
+                    data_tensor = torch.stack(*tensors_list, 0)
+                    if my_params_gen is not None:
                         loss = torch.mean(
                             self.model(
                                 data_tensor,
-                                loss_gen,
-                                encoder_key=losses_wvar,
+                                my_loss_gen,
+                                encoder_key=my_losses_wvar,
                                 n_samples_mc=n_samples_theta,
                                 counts=counts,
                                 z_encoder=z_encoder,
@@ -365,10 +381,8 @@ class GaussianDefensiveTrainer(Trainer):
                         loss.backward()
                         optimizers["theta"].step()
 
-                for tensors_list in self.data_loaders_loop():
-                    data_tensor = torch.stack(*tensors_list, 0)
-                    for enc_loss_key in losses_wvar:
-                        loss = torch.mean(
+                    for enc_loss_key in my_losses_wvar:
+                        loss_enc = torch.mean(
                             self.model(
                                 data_tensor,
                                 enc_loss_key,
@@ -378,19 +392,15 @@ class GaussianDefensiveTrainer(Trainer):
                             )
                         )
                         optimizers[enc_loss_key].zero_grad()
-                        loss.backward()
+                        loss_enc.backward()
                         optimizers[enc_loss_key].step()
 
                 # if not self.on_epoch_end():
                 #     break
 
-                if params_gen is not None:
-                    # sgm_norm
-                    # a_err_norm
+                if my_params_gen is not None:
                     sgm_err_mat = (
-                        np.diag(
-                            self.model.px_log_diag_var.exp().detach().cpu().squeeze()
-                        )
+                        np.diag(self.model.px_log_diag_var.exp().detach().cpu().squeeze())
                         - self.gene_dataset.gamma
                     )
                     self.custom_metrics["sgm_norm"].append(
@@ -460,6 +470,8 @@ class GaussianDefensivePosterior(Posterior):
             ll = multivariate_normal.logpdf(X, mean=mean, cov=cov).mean()
         except np.linalg.LinAlgError:
             raise ValueError(sigma_z_x)
+        except ValueError:
+            raise ValueError(sigma_z_x, w)
         return ll
 
     @torch.no_grad()
