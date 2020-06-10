@@ -29,11 +29,6 @@ logging.basicConfig(
     handlers=[logging.FileHandler("debug.log"), logging.StreamHandler()],
 )
 FILENAME = "ppca-def351_100_100_full_with_students_no_land_k5_defensive"
-# neptune.init(
-#     project_qualified_name="pierreboyeau/{}".format(FILENAME),
-#     api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vdWkubmVwdHVuZS5haSIsImFwaV91cmwiOiJodHRwczovL3VpLm5lcHR1bmUuYWkiLCJhcGlfa2V5IjoiYzhhNDJiMDgtZGI3YS00ZjAzLWI3NTItOTBjYjA5OGMyNTI1In0=",
-# )
-
 
 # FILENAME = "deleteme"
 n_simu = 5
@@ -338,5 +333,4 @@ for dic in scenarios:
         params_train_gen = None
         params_train_wvar = None
 df_res = pd.DataFrame(df)
-# df_res.to_csv("{}.csv".format(FILENAME), sep="\t")
 df_res.to_pickle("{}.pkl".format(FILENAME))
