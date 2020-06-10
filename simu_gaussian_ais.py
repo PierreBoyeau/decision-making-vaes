@@ -92,7 +92,7 @@ for learn_var, loss_gen, loss_wvar, counts, do_linear_encoder in scenarios:
             )
 
             if loss_gen is not None:
-                params_gen = [model.px_log_diag_var]
+                params_gen = [model._px_log_diag_var]
             if do_defensive:
                 params_wvar = filter(
                     lambda p: p.requires_grad, model.encoder["CUBO"].parameters()
