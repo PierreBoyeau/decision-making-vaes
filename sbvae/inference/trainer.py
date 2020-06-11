@@ -46,6 +46,7 @@ class Trainer:
         weight_decay=1e-6,
         early_stopping_kwargs=dict(),
         data_loader_kwargs=dict(),
+        pin_memory=False,
         batch_size=128,
     ):
 
@@ -53,7 +54,7 @@ class Trainer:
         self.gene_dataset = gene_dataset
         self._posteriors = OrderedDict()
 
-        self.data_loader_kwargs = {"batch_size": batch_size, "pin_memory": use_cuda}
+        self.data_loader_kwargs = {"batch_size": batch_size, "pin_memory": pin_memory}
         self.batch_size = batch_size
         self.data_loader_kwargs.update(data_loader_kwargs)
 

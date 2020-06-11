@@ -1,6 +1,6 @@
 import collections
 import logging
-from typing import Iterable
+from typing import Iterable, Union
 
 import numpy as np
 import torch
@@ -9,6 +9,7 @@ from torch import nn as nn
 from torch.distributions import Normal
 
 from sbvae.models.utils import one_hot
+from sbvae.models.distributions import EllipticalStudent
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,8 @@ class FCLayers(nn.Module):
                             x = torch.cat(
                                 [(layer(slice_x)).unsqueeze(0) for slice_x in x], dim=0
                             )
+                            # shape n_post_samples, n_batch, n_features
+                            # x = layer(x.transpose(-1, -2)).transpose(-1, -2)
                         else:
                             x = layer(x)
                     else:
@@ -180,7 +183,7 @@ class Encoder(nn.Module):
         # Parameters for latent distribution
         q = self.encoder(x, *cat_list)
         q_m = self.mean_encoder(q)
-        q_v = 1e-16 + self.var_encoder(q)
+        q_v = self.var_encoder(q)
 
         if self.prevent_saturation:
             q_m = 12.0 * nn.Tanh()(q_m)
@@ -192,15 +195,134 @@ class Encoder(nn.Module):
             q_v = torch.clamp(q_v, min=-18.0, max=0.1)
             q_v = torch.exp(q_v)
         else:
-            q_v = torch.clamp(q_v, min=-18.0, max=14.0)
-            q_v = 1e-16 + torch.exp(
+            q_v = torch.clamp(q_v, min=-12.0, max=8.0)
+            q_v = torch.exp(
                 self.var_encoder(q)
             )  # (computational stability safeguard)torch.clamp(, -5, 5)
         if (n_samples > 1) or (not squeeze):
             q_m = q_m.unsqueeze(0).expand((n_samples, q_m.size(0), q_m.size(1)))
             q_v = q_v.unsqueeze(0).expand((n_samples, q_v.size(0), q_v.size(1)))
+        dist = Normal(q_m, q_v.sqrt())
         latent = self.reparameterize(q_m, q_v, reparam=reparam)
-        return dict(q_m=q_m, q_v=q_v, latent=latent)
+        return dict(
+            q_m=q_m,
+            q_v=q_v,
+            latent=latent,
+            posterior_density=None,
+            dist=dist,
+            sum_last=True,
+        )
+
+
+# Encoder
+class EncoderStudent(nn.Module):
+    r"""Encodes data of ``n_input`` dimensions into a latent space of ``n_output``
+    dimensions using a fully-connected neural network of ``n_hidden`` layers.
+
+    :param n_input: The dimensionality of the input (data space)
+    :param n_output: The dimensionality of the output (latent space)
+    :param n_cat_list: A list containing the number of categories
+                       for each category of interest. Each category will be
+                       included using a one-hot encoding
+    :param n_layers: The number of fully-connected hidden layers
+    :param n_hidden: The number of nodes per hidden layer
+    :dropout_rate: Dropout rate to apply to each of the hidden layers
+    """
+
+    def __init__(
+        self,
+        n_input: int,
+        n_output: int,
+        n_cat_list: Iterable[int] = None,
+        df: Union[float, str] = 1.0,
+        n_layers: int = 1,
+        n_hidden: int = 128,
+        dropout_rate: float = 0.1,
+        use_batch_norm: bool = True,
+        verbose: bool = False,
+    ):
+        super().__init__()
+        self.verbose = verbose
+        if df == "learn":
+            self.df_val = nn.Linear(n_hidden, 1)
+            nn.init.zeros_(self.df_val.weight)
+            nn.init.zeros_(self.df_val.bias)
+            self.learn_df = True
+        else:
+            self.df_val = df
+            self.learn_df = False
+        self.encoder = FCLayers(
+            n_in=n_input,
+            n_out=n_hidden,
+            n_cat_list=n_cat_list,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            use_batch_norm=use_batch_norm,
+            dropout_rate=dropout_rate,
+        )
+        self.mean_encoder = nn.Linear(n_hidden, n_output)
+        self.var_encoder = nn.Linear(n_hidden, n_output)
+
+    # @property
+    def df(self, q: torch.Tensor):
+        if self.learn_df:
+            df_use = 1.0 + self.df_val(q).exp()
+            df_use = torch.clamp(df_use, max=1e5)
+            return df_use
+        else:
+            return torch.tensor(self.df_val, device="cuda")
+
+    def reparameterize(self, dist, reparam=True):
+        if reparam:
+            latent = dist.rsample()
+        else:
+            latent = dist.sample()
+        return latent
+
+    def forward(
+        self, x: torch.Tensor, *cat_list: int, n_samples=1, reparam=True, squeeze=True
+    ):
+        r"""The forward computation for a single sample.
+
+         #. Encodes the data into latent space using the encoder network
+         #. Generates a mean \\( q_m \\) and variance \\( q_v \\) (clamped to \\( [-5, 5] \\))
+         #. Samples a new value from an i.i.d. multivariate normal \\( \\sim N(q_m, \\mathbf{I}q_v) \\)
+
+        :param x: tensor with shape (n_input,)
+        :param cat_list: list of category membership(s) for this sample
+        :return: tensors of shape ``(n_latent,)`` for mean and var, and sample
+        :rtype: 3-tuple of :py:class:`torch.Tensor`
+        """
+
+        # Parameters for latent distribution
+        q = self.encoder(x, *cat_list)
+        q_m = self.mean_encoder(q)
+        q_v = 1e-16 + self.var_encoder(q)
+        df_to_use = self.df(q)  # .squeeze()
+
+        q_v = torch.clamp(q_v, min=-18.0, max=14.0)
+        q_v = 1e-16 + torch.exp(
+            self.var_encoder(q)
+        )  # (computational stability safeguard)torch.clamp(, -5, 5)
+        if (n_samples > 1) or (not squeeze):
+            q_m = q_m.unsqueeze(0).expand((n_samples, q_m.size(0), q_m.size(1)))
+            q_v = q_v.unsqueeze(0).expand((n_samples, q_v.size(0), q_v.size(1)))
+
+        st_dist = EllipticalStudent(
+            df=df_to_use, loc=q_m, scale=torch.sqrt(q_v), verbose=self.verbose
+        )
+        # st_dist = StudentT(df=df_to_use, loc=q_m, scale=torch.sqrt(q_v))
+        latent = self.reparameterize(st_dist, reparam=reparam)
+        log_density = st_dist.log_prob(latent)  # .sum(dim=-1)
+        return dict(
+            q_m=q_m,
+            q_v=q_v,
+            latent=latent,
+            posterior_density=log_density,
+            df=df_to_use,
+            dist=st_dist,
+            sum_last=False,
+        )
 
 
 # Decoder
@@ -225,6 +347,7 @@ class DecoderSCVI(nn.Module):
         n_cat_list: Iterable[int] = None,
         n_layers: int = 1,
         n_hidden: int = 128,
+        use_batch_norm: bool = True,
     ):
         super().__init__()
         self.px_decoder = FCLayers(
@@ -234,6 +357,7 @@ class DecoderSCVI(nn.Module):
             n_layers=n_layers,
             n_hidden=n_hidden,
             dropout_rate=0,
+            use_batch_norm=use_batch_norm,
         )
 
         # mean gamma
@@ -555,4 +679,4 @@ class EncoderIAF(nn.Module):
 
         if torch.isnan(qz_x).any() or torch.isinf(qz_x).any():
             print("ouille")
-        return dict(latent=z, posterior_density=qz_x, last_inp=inp)
+        return dict(latent=z, posterior_density=qz_x, last_inp=inp, q_m=None, q_v=None)

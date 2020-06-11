@@ -4,6 +4,7 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn as nn
 from scipy.stats import multivariate_normal
 from tqdm import trange
 
@@ -37,11 +38,26 @@ class GaussianDefensiveTrainer(Trainer):
             self.train_set.to_monitor = ["elbo"]
             self.test_set.to_monitor = ["elbo"]
 
-    def train(self, params, losses, n_epochs=20, lr=1e-3, eps=0.01):
+    def train(
+        self,
+        params,
+        losses,
+        n_epochs=20,
+        lr=1e-3,
+        eps=0.01,
+        z_encoder: nn.Module = None,
+        n_samples_phi: int = None,
+        n_samples_theta: int = 1,
+    ):
         params_gen, params_wvar, params_svar = params
         loss_gen, loss_wvar, loss_svar = losses
         begin = time.time()
         self.model.train()
+        self.custom_metrics = dict(
+            sgm_norm=[], a_err_norm=[], mdl_ll_train=[], mdl_ll_test=[]
+        )
+        print("using n_samples_phi", n_samples_phi)
+        print("train with custom encoder {}".format(z_encoder is not None))
 
         optimizers = [0, 0, 0]
 
@@ -70,7 +86,14 @@ class GaussianDefensiveTrainer(Trainer):
                     # WAKE PHASE for generative model
                     for tensors_list in self.data_loaders_loop():
                         data_tensor = torch.stack(*tensors_list, 0)
-                        loss = torch.mean(self.model(data_tensor, loss_gen))
+                        loss = torch.mean(
+                            self.model(
+                                data_tensor,
+                                loss_gen,
+                                z_encoder=z_encoder,
+                                n_samples_mc=n_samples_theta,
+                            )
+                        )
                         optimizers[0].zero_grad()
                         loss.backward()
                         optimizers[0].step()
@@ -92,7 +115,14 @@ class GaussianDefensiveTrainer(Trainer):
 
                     for tensors_list in self.data_loaders_loop():
                         data_tensor = torch.stack(*tensors_list, 0)
-                        loss = torch.mean(self.model(data_tensor, loss_wvar_epoch))
+                        loss = torch.mean(
+                            self.model(
+                                data_tensor,
+                                loss_wvar_epoch,
+                                z_encoder=z_encoder,
+                                n_samples_mc=n_samples_phi,
+                            )
+                        )
                         optimizers[1].zero_grad()
                         loss.backward()
                         optimizers[1].step()
@@ -104,10 +134,35 @@ class GaussianDefensiveTrainer(Trainer):
                     for tensors_list in self.data_loaders_loop():
                         # ignore the data
                         x, z = self.model.generate_prior_data()
-                        loss = torch.mean(self.model((x, z), loss_svar))
+                        loss = torch.mean(
+                            self.model((x, z), loss_svar, z_encoder=z_encoder)
+                        )
                         optimizers[2].zero_grad()
                         loss.backward()
                         optimizers[2].step()
+
+                if params_gen is not None:
+                    # sgm_norm
+                    # a_err_norm
+                    sgm_err_mat = (
+                        np.diag(
+                            self.model.px_log_diag_var.exp().detach().cpu().squeeze()
+                        )
+                        - self.gene_dataset.gamma
+                    )
+                    self.custom_metrics["sgm_norm"].append(
+                        np.linalg.norm(sgm_err_mat, ord=2)
+                    )
+                    a_err_mat = self.model.A.detach().cpu() - self.gene_dataset.A
+                    self.custom_metrics["a_err_norm"].append(
+                        np.linalg.norm(a_err_mat, ord=2)
+                    )
+                    self.custom_metrics["mdl_ll_train"].append(
+                        self.train_set.model_log_likelihood()
+                    )
+                    self.custom_metrics["mdl_ll_test"].append(
+                        self.test_set.model_log_likelihood()
+                    )
 
                 # if not self.on_epoch_end():
                 #     break
@@ -125,13 +180,24 @@ class GaussianDefensiveTrainer(Trainer):
             )
 
     def train_defensive(
-        self, params, losses, n_epochs=20, lr=1e-3, eps=0.01, counts=None
+        self,
+        params,
+        losses,
+        n_epochs=20,
+        lr=1e-3,
+        eps=0.01,
+        counts=None,
+        z_encoder: nn.Module = None,
+        n_samples_phi: int = None,
     ):
+        print("train with custom encoder {}".format(z_encoder is not None))
         params_gen, params_w_cubo_var, params_w_eubo_var = params
         loss_gen, _, _ = losses
         begin = time.time()
         self.model.train()
-
+        self.custom_metrics = dict(
+            sgm_norm=[], a_err_norm=[], mdl_ll_train=[], mdl_ll_test=[]
+        )
         optimizers = [0, 0, 0]
 
         if params_gen is not None:
@@ -163,6 +229,7 @@ class GaussianDefensiveTrainer(Trainer):
                                 loss_gen,
                                 encoder_key="defensive",
                                 counts=counts,
+                                z_encoder=z_encoder,
                             )
                         )
                         optimizers[0].zero_grad()
@@ -173,7 +240,13 @@ class GaussianDefensiveTrainer(Trainer):
                     data_tensor = torch.stack(*tensors_list, 0)
                     # CUBO wake update
                     loss = torch.mean(
-                        self.model(data_tensor, "CUBO", encoder_key="CUBO")
+                        self.model(
+                            data_tensor,
+                            "CUBO",
+                            encoder_key="CUBO",
+                            z_encoder=z_encoder,
+                            n_samples_mc=n_samples_phi,
+                        )
                     )
                     optimizers[1].zero_grad()
                     loss.backward()
@@ -181,7 +254,13 @@ class GaussianDefensiveTrainer(Trainer):
 
                     # EUBO wake update
                     loss = torch.mean(
-                        self.model(data_tensor, "REVKL", encoder_key="EUBO")
+                        self.model(
+                            data_tensor,
+                            "REVKL",
+                            encoder_key="EUBO",
+                            z_encoder=z_encoder,
+                            n_samples_mc=n_samples_phi,
+                        )
                     )
                     optimizers[2].zero_grad()
                     loss.backward()
@@ -189,6 +268,154 @@ class GaussianDefensiveTrainer(Trainer):
 
                 # if not self.on_epoch_end():
                 #     break
+
+                if params_gen is not None:
+                    # sgm_norm
+                    # a_err_norm
+                    sgm_err_mat = (
+                        np.diag(
+                            self.model.px_log_diag_var.exp().detach().cpu().squeeze()
+                        )
+                        - self.gene_dataset.gamma
+                    )
+                    self.custom_metrics["sgm_norm"].append(
+                        np.linalg.norm(sgm_err_mat, ord=2)
+                    )
+                    a_err_mat = self.model.A.detach().cpu() - self.gene_dataset.A
+                    self.custom_metrics["a_err_norm"].append(
+                        np.linalg.norm(a_err_mat, ord=2)
+                    )
+                    self.custom_metrics["mdl_ll_train"].append(
+                        self.train_set.model_log_likelihood()
+                    )
+                    self.custom_metrics["mdl_ll_test"].append(
+                        self.test_set.model_log_likelihood()
+                    )
+
+        if self.early_stopping.save_best_state_metric is not None:
+            self.model.load_state_dict(self.best_state_dict)
+            self.compute_metrics()
+
+        self.model.eval()
+        self.training_time += (time.time() - begin) - self.compute_metrics_time
+        if self.verbose and self.frequency:
+            print(
+                "\nTraining time:  %i s. / %i epochs"
+                % (int(self.training_time), self.n_epochs)
+            )
+
+    def train_all_cases(
+        self,
+        params,
+        losses,
+        n_epochs=20,
+        lr=1e-3,
+        eps=0.01,
+        z_encoder: nn.Module = None,
+        counts=None,
+        n_samples_theta: int = None,
+        n_samples_phi: int = None,
+    ):
+        print("train with custom encoder {}".format(z_encoder is not None))
+        my_params_gen, my_params_wvar, _ = params
+        my_loss_gen, my_losses_wvar, _ = losses
+        begin = time.time()
+        self.model.train()
+        self.custom_metrics = dict(
+            sgm_norm=[], a_err_norm=[], mdl_ll_train=[], mdl_ll_test=[]
+        )
+        optimizers = dict()
+
+        if my_params_gen is not None:
+            print("WAKE UPDATE GENERATIVE MODEL")
+            optimizers["theta"] = torch.optim.Adam(my_params_gen, lr=lr, eps=eps)
+        print("TRAIN WITH {}".format(my_losses_wvar))
+        for enc_loss_key in my_losses_wvar:
+            optimizers[enc_loss_key] = torch.optim.Adam(
+                my_params_wvar[enc_loss_key], lr=lr, eps=eps
+            )
+
+        self.compute_metrics_time = 0
+        self.n_epochs = n_epochs
+        # self.compute_metrics()
+
+        with trange(n_epochs, desc="training", file=sys.stderr, disable=True) as pbar:
+            # We have to use tqdm this way so it works in Jupyter notebook.
+            # See https://stackoverflow.com/questions/42212810/tqdm-in-jupyter-notebook
+            for self.epoch in pbar:
+                self.on_epoch_begin()
+                pbar.update(1)
+
+                # if my_params_gen is not None:
+                #     # WAKE PHASE for generative model
+                #     for tensors_list in self.data_loaders_loop():
+                #         data_tensor = torch.stack(*tensors_list, 0)
+                #         loss = torch.mean(
+                #             self.model(
+                #                 data_tensor,
+                #                 my_loss_gen,
+                #                 encoder_key=my_losses_wvar,
+                #                 n_samples_mc=n_samples_theta,
+                #                 counts=counts,
+                #                 z_encoder=z_encoder,
+                #             )
+                #         )
+                #         optimizers["theta"].zero_grad()
+                #         loss.backward()
+                #         optimizers["theta"].step()
+
+                for tensors_list in self.data_loaders_loop():
+                    data_tensor = torch.stack(*tensors_list, 0)
+                    if my_params_gen is not None:
+                        loss = torch.mean(
+                            self.model(
+                                data_tensor,
+                                my_loss_gen,
+                                encoder_key=my_losses_wvar,
+                                n_samples_mc=n_samples_theta,
+                                counts=counts,
+                                z_encoder=z_encoder,
+                            )
+                        )
+                        optimizers["theta"].zero_grad()
+                        loss.backward()
+                        optimizers["theta"].step()
+
+                    for enc_loss_key in my_losses_wvar:
+                        loss_enc = torch.mean(
+                            self.model(
+                                data_tensor,
+                                enc_loss_key,
+                                encoder_key=enc_loss_key,
+                                z_encoder=z_encoder,
+                                n_samples_mc=n_samples_phi,
+                            )
+                        )
+                        optimizers[enc_loss_key].zero_grad()
+                        loss_enc.backward()
+                        optimizers[enc_loss_key].step()
+
+                # if not self.on_epoch_end():
+                #     break
+
+                if my_params_gen is not None:
+                    sgm_err_mat = (
+                        np.diag(self.model.px_log_diag_var.exp().detach().cpu().squeeze())
+                        - self.gene_dataset.gamma
+                    )
+                    self.custom_metrics["sgm_norm"].append(
+                        np.linalg.norm(sgm_err_mat, ord=2)
+                    )
+                    a_err_mat = self.model.A.detach().cpu() - self.gene_dataset.A
+                    self.custom_metrics["a_err_norm"].append(
+                        np.linalg.norm(a_err_mat, ord=2)
+                    )
+                    self.custom_metrics["mdl_ll_train"].append(
+                        self.train_set.model_log_likelihood()
+                    )
+                    self.custom_metrics["mdl_ll_test"].append(
+                        self.test_set.model_log_likelihood()
+                    )
 
         if self.early_stopping.save_best_state_metric is not None:
             self.model.load_state_dict(self.best_state_dict)
@@ -233,13 +460,39 @@ class GaussianDefensivePosterior(Posterior):
         return ll
 
     @torch.no_grad()
-    def iwelbo(self, n_samples_mc, verbose=False, encoder_key="default", counts=None):
+    def model_log_likelihood(self, verbose=False):
+        sigma_z_x = np.diag(self.model.px_log_diag_var.exp().squeeze().detach().cpu())
+        w = self.model.A.detach().cpu().numpy()
+        X = self.gene_dataset.X[self.indices]
+        cov = sigma_z_x + w @ w.T
+        mean = np.zeros(X.shape[1])
+        try:
+            ll = multivariate_normal.logpdf(X, mean=mean, cov=cov).mean()
+        except np.linalg.LinAlgError:
+            raise ValueError(sigma_z_x)
+        except ValueError:
+            raise ValueError(sigma_z_x, w)
+        return ll
+
+    @torch.no_grad()
+    def iwelbo(
+        self,
+        n_samples_mc,
+        verbose=False,
+        encoder_key="default",
+        counts=None,
+        z_encoder: nn.Module = None,
+    ):
         # Iterate once over the posterior and computes the total log_likelihood
         log_lkl = 0
         for i_batch, tensors in enumerate(self):
             data_tensor = torch.stack(tensors, 0)
             loss = self.model.neg_iwelbo(
-                data_tensor, n_samples_mc, encoder_key=encoder_key, counts=counts
+                data_tensor,
+                n_samples_mc,
+                encoder_key=encoder_key,
+                counts=counts,
+                z_encoder=z_encoder,
             )
             log_lkl += torch.sum(loss).item()
         n_samples = len(self.indices)
@@ -292,7 +545,15 @@ class GaussianDefensivePosterior(Posterior):
         return ave_var / n_samples
 
     @torch.no_grad()
-    def prob_eval(self, n_samples_mc, nu=0.0, encoder_key="default", counts=None):
+    def prob_eval(
+        self,
+        n_samples_mc,
+        nu=0.0,
+        encoder_key="default",
+        counts=None,
+        z_encoder: nn.Module = None,
+        plugin_estimator=False,
+    ):
         # Iterate once over the posterior and get the marginal variance
         prob = []
         qz_m = []
@@ -300,22 +561,51 @@ class GaussianDefensivePosterior(Posterior):
         ess = []
         for i_batch, tensors in enumerate(self):
             data_tensor = torch.stack(tensors, 0)
-            x, y, z, t = self.model.prob_event(
-                data_tensor, n_samples_mc, nu=nu, encoder_key=encoder_key, counts=counts
-            )
-            qz_m += [x.cpu()]
-            qz_v += [y.cpu()]
+            if plugin_estimator:
+                x, y, z, t = self.model.prob_event_plugin(
+                    data_tensor,
+                    n_samples_mc,
+                    nu=nu,
+                    encoder_key=encoder_key,
+                    counts=counts,
+                    z_encoder=z_encoder,
+                )
+            else:
+                x, y, z, t = self.model.prob_event(
+                    data_tensor,
+                    n_samples_mc,
+                    nu=nu,
+                    encoder_key=encoder_key,
+                    counts=counts,
+                    z_encoder=z_encoder,
+                )
+            if x is not None:
+                x = x.cpu()
+            if y is not None:
+                y = y.cpu()
+            qz_m += [x]
+            qz_v += [y]
             prob += [z.cpu()]
             ess += [t.cpu()]
 
+        if x is not None:
+            qz_m = np.array(torch.cat(qz_m))
+        if y is not None:
+            qz_v = np.array(torch.cat(qz_v))
         return (
-            np.array(torch.cat(qz_m)),
-            np.array(torch.cat(qz_v)),
+            qz_m,
+            qz_v,
             np.array(torch.cat(prob)),
             np.array(torch.cat(ess)),
         )
 
-    def log_ratios(self, n_samples_mc, encoder_key="default", counts=None):
+    def log_ratios(
+        self,
+        n_samples_mc,
+        encoder_key="default",
+        counts=None,
+        z_encoder: nn.Module = None,
+    ):
         all_log_ratios = []
         for i_batch, tensors in enumerate(self):
             data_tensor = torch.stack(tensors, 0)
@@ -325,6 +615,7 @@ class GaussianDefensivePosterior(Posterior):
                 reparam=True,
                 encoder_key=encoder_key,
                 counts=counts,
+                z_encoder=z_encoder,
             )
             log_ratios = self.model.log_ratio(
                 data_tensor, px_mean, px_var, log_qz_given_x, z

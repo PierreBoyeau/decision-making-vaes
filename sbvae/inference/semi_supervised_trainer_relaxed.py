@@ -1,28 +1,35 @@
 import logging
 from itertools import cycle
 
+import pandas as pd
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from sbvae.dataset import MnistDataset
-from sbvae.models import SemiSupervisedVAE
 
 logger = logging.getLogger(__name__)
 
 
-class MnistTrainer:
+class MnistRTrainer:
     def __init__(
         self,
         dataset: MnistDataset,
-        model: SemiSupervisedVAE,
+        model,
         batch_size: int = 128,
+        classify_mode: str = "vanilla",
+        r: float = 5e-4,
         use_cuda=True,
         save_metrics=False,
+        debug_gradients=False,
     ):
+        self.classify_mode = classify_mode
+        self.r = r
+        self.debug_gradients = debug_gradients
         self.dataset = dataset
         self.model = model
         self.train_loader = DataLoader(
@@ -44,6 +51,7 @@ class MnistTrainer:
             pin_memory=use_cuda,
         )
         self.cross_entropy_fn = CrossEntropyLoss()
+        self.it = 0
 
         self.save_metrics = save_metrics
         self.iterate = 0
@@ -54,7 +62,15 @@ class MnistTrainer:
             train_loss=[],
             classification_loss=[],
             train_cubo=[],
+            classification_gradients=[],
         )
+
+    @property
+    def temperature(self):
+        t_ref = self.it - (self.it % 500)
+        t_ref = t_ref * self.r
+        t_ref = np.exp(-t_ref)
+        return np.maximum(0.5, t_ref)
 
     def train(
         self,
@@ -91,45 +107,31 @@ class MnistTrainer:
             optim = Adam(params, lr=lr)
             logger.info("Monobjective using {} loss".format(overall_loss))
         else:
-            if not z2_with_elbo:
-                params_gen = filter(
-                    lambda p: p.requires_grad,
-                    list(self.model.decoder_z1_z2.parameters())
-                    + list(self.model.x_decoder.parameters()),
-                )
-                optim_gen = Adam(params_gen, lr=lr)
+            params_gen = filter(
+                lambda p: p.requires_grad,
+                list(self.model.decoder_z1_z2.parameters())
+                + list(self.model.x_decoder.parameters()),
+            )
+            optim_gen = Adam(params_gen, lr=lr)
 
-                params_var = filter(
-                    lambda p: p.requires_grad,
-                    list(self.model.classifier.parameters())
-                    + list(self.model.encoder_z1.parameters())
-                    + list(self.model.encoder_z2_z1.parameters()),
-                )
-
-            else:
-                params_gen = filter(
-                    lambda p: p.requires_grad,
-                    list(self.model.decoder_z1_z2.parameters())
-                    + list(self.model.x_decoder.parameters())
-                    + list(self.model.encoder_z2_z1.parameters()),
-                )
-                optim_gen = Adam(params_gen, lr=lr)
-
-                params_var = filter(
-                    lambda p: p.requires_grad,
-                    list(self.model.classifier.parameters())
-                    + list(self.model.encoder_z1.parameters()),
-                )
+            params_var = filter(
+                lambda p: p.requires_grad,
+                list(self.model.classifier.parameters())
+                + list(self.model.encoder_z1.parameters())
+                + list(self.model.encoder_z2_z1.parameters()),
+            )
 
             optim_var_wake = Adam(params_var, lr=lr)
             logger.info(
                 "Multiobjective training using {} / {}".format(wake_theta, wake_psi)
             )
 
-        for epoch in tqdm(range(n_epochs)):
+        pbar = tqdm(range(n_epochs))
+        for epoch in pbar:
             for (tensor_all, tensor_superv) in zip(
                 self.train_loader, cycle(self.train_annotated_loader)
             ):
+                self.it += 1
 
                 x_u, _ = tensor_all
                 x_s, y_s = tensor_superv
@@ -152,7 +154,7 @@ class MnistTrainer:
                     optim.zero_grad()
                     loss.backward()
                     optim.step()
-                    torch.cuda.synchronize()
+                    # torch.cuda.synchronize()
 
                     if self.iterate % 100 == 0:
                         self.metrics["train_loss"].append(loss.item())
@@ -166,39 +168,18 @@ class MnistTrainer:
                         n_samples=n_samples_theta,
                         reparam=True,
                         classification_ratio=classification_ratio,
+                        mode=update_mode,
                     )
                     optim_gen.zero_grad()
                     theta_loss.backward()
                     optim_gen.step()
-                    torch.cuda.synchronize()
+                    # torch.cuda.synchronize()
 
                     if self.iterate % 100 == 0:
                         self.metrics["train_theta_wake"].append(theta_loss.item())
 
-                    # Wake phi
-                    if wake_psi == "REVKL+CUBO":
-                        if epoch <= int(n_epochs / 3):
-                            reparam_epoch = False
-                            wake_psi_epoch = "REVKL"
-                        else:
-                            reparam_epoch = True
-                            wake_psi_epoch = "CUBO"
-                    elif wake_psi == "ELBO+CUBO":
-                        reparam_epoch = True
-                        if epoch <= int(n_epochs / 3):
-                            wake_psi_epoch = "ELBO"
-                        else:
-                            wake_psi_epoch = "CUBO"
-                    elif wake_psi == "ELBO+REVKL":
-                        if epoch <= int(n_epochs / 3):
-                            wake_psi_epoch = "ELBO"
-                            reparam_epoch = True
-                        else:
-                            wake_psi_epoch = "REVKL"
-                            reparam_epoch = False
-                    else:
-                        reparam_epoch = reparam_wphi
-                        wake_psi_epoch = wake_psi
+                    reparam_epoch = reparam_wphi
+                    wake_psi_epoch = wake_psi
 
                     psi_loss = self.loss(
                         x_u=x_u,
@@ -208,71 +189,152 @@ class MnistTrainer:
                         n_samples=n_samples_phi,
                         reparam=reparam_epoch,
                         classification_ratio=classification_ratio,
+                        mode=update_mode,
                     )
                     optim_var_wake.zero_grad()
                     psi_loss.backward()
                     optim_var_wake.step()
-                    torch.cuda.synchronize()
+                    # torch.cuda.synchronize()
                     if self.iterate % 100 == 0:
                         self.metrics["train_phi_wake"].append(psi_loss.item())
+                        if self.debug_gradients:
+                            self.metrics["classification_gradients"].append(
+                                self.model.classifier["default"]
+                                .classifier[0]
+                                .to_hidden.weight.grad.cpu()
+                            )
 
                 self.iterate += 1
+            pbar.set_description("{0:.2f}".format(theta_loss.item()))
+
+    def train_eval_encoder(
+        self,
+        encoders: dict,
+        n_epochs: int,
+        lr: float = 1e-3,
+        wake_psi: str = "ELBO",
+        n_samples_phi: int = None,
+        classification_ratio: float = 50.0,
+        reparam_wphi: bool = True,
+    ):
+        reparam_mapper = dict(
+            default=reparam_wphi,
+            ELBO=True,
+            CUBO=True,
+            REVKL=False,
+            IWELBO=True,
+            IWELBOC=True,
+        )
+
+        logger.info(
+            "Using {n_samples_phi} samples for eval encoder training".format(
+                n_samples_phi=n_samples_phi
+            )
+        )
+        classifier = encoders["classifier"]
+        encoder_z1 = encoders["encoder_z1"]
+        encoder_z2_z1 = encoders["encoder_z2_z1"]
+        self.model.update_q(
+            classifier=classifier, encoder_z1=encoder_z1, encoder_z2_z1=encoder_z2_z1,
+        )
+
+        # params_var = filter(
+        #     lambda p: p.requires_grad,
+        #     list(classifier.parameters())
+        #     + list(encoder_z1.parameters())
+        #     + list(encoder_z2_z1.parameters()),
+        # )
+        # optim_var_wake = Adam(params_var, lr=lr)
+
+        if type(wake_psi) == list:
+            encoder_keys = wake_psi
+        else:
+            encoder_keys = ["default"]
+
+        def get_params(key):
+            return filter(
+                lambda p: p.requires_grad,
+                list(classifier[key].parameters())
+                + list(encoder_z1[key].parameters())
+                + list(encoder_z2_z1[key].parameters()),
+            )
+
+        params_var = {key: get_params(key) for key in encoder_keys}
+        optim_vars = {key: Adam(params_var[key], lr=lr) for key in encoder_keys}
+
+        logger.info("Training using {}".format(wake_psi))
+
+        for epoch in tqdm(range(n_epochs)):
+            for (tensor_all, tensor_superv) in zip(
+                self.train_loader, cycle(self.train_annotated_loader)
+            ):
+
+                x_u, _ = tensor_all
+                x_s, y_s = tensor_superv
+
+                x_u = x_u.to("cuda")
+                x_s = x_s.to("cuda")
+                y_s = y_s.to("cuda")
+
+                # Wake phi
+                for key in encoder_keys:
+                    if key == "default":
+                        reparam_epoch = reparam_wphi
+                        wake_psi_epoch = wake_psi
+                    else:
+                        reparam_epoch = reparam_mapper[key]
+                        wake_psi_epoch = key
+
+                    psi_loss = self.loss(
+                        x_u=x_u,
+                        x_s=x_s,
+                        y_s=y_s,
+                        loss_type=wake_psi_epoch,
+                        n_samples=n_samples_phi,
+                        reparam=reparam_epoch,
+                        encoder_key=key,
+                        classification_ratio=classification_ratio,
+                    )
+                    optim_vars[key].zero_grad()
+                    psi_loss.backward()
+                    optim_vars[key].step()
+                    # torch.cuda.synchronize()
+                    self.iterate += 1
 
     def train_defensive(
         self,
         n_epochs,
+        counts: pd.Series,
         lr=1e-3,
         wake_theta: str = "ELBO",
-        cubo_wake_psi: str = "CUBOB",
-        eubo_wake_psi: str = "REVKL",
         n_samples_phi: int = None,
         n_samples_theta: int = None,
         classification_ratio: float = 50.0,
         update_mode: str = "all",
-        counts=torch.tensor([8, 8, 2]),
-        cubo_z2_with_elbo=False,
     ):
+        reparams_info = dict(
+            CUBO=True, IWELBO=True, IWELBOC=True, ELBO=True, CUBOB=True, REVKL=False
+        )
         assert update_mode in ["all", "alternate"]
 
-        if cubo_z2_with_elbo:
-            params_gen = filter(
-                lambda p: p.requires_grad,
-                list(self.model.decoder_z1_z2.parameters())
-                + list(self.model.x_decoder.parameters())
-                + list(self.model.encoder_z2_z1["CUBO"].parameters()),
-            )
-            optim_gen = Adam(params_gen, lr=lr)
-
-            params_cubo_var = filter(
-                lambda p: p.requires_grad,
-                list(self.model.classifier["CUBO"].parameters())
-                + list(self.model.encoder_z1["CUBO"].parameters()),
-            )
-            optim_cubo_var = Adam(params_cubo_var, lr=lr)
-        else:
-            params_gen = filter(
-                lambda p: p.requires_grad,
-                list(self.model.decoder_z1_z2.parameters())
-                + list(self.model.x_decoder.parameters()),
-            )
-            optim_gen = Adam(params_gen, lr=lr)
-
-            params_cubo_var = filter(
-                lambda p: p.requires_grad,
-                list(self.model.classifier["CUBO"].parameters())
-                + list(self.model.encoder_z1["CUBO"].parameters())
-                + list(self.model.encoder_z2_z1["CUBO"].parameters()),
-            )
-            optim_cubo_var = Adam(params_cubo_var, lr=lr)
-
-        params_eubo_var = filter(
+        params_gen = filter(
             lambda p: p.requires_grad,
-            list(self.model.classifier["EUBO"].parameters())
-            + list(self.model.encoder_z1["EUBO"].parameters())
-            + list(self.model.encoder_z2_z1["EUBO"].parameters()),
+            list(self.model.decoder_z1_z2.parameters())
+            + list(self.model.x_decoder.parameters()),
         )
-        optim_eubo_var = Adam(params_eubo_var, lr=lr)
+        optim_gen = Adam(params_gen, lr=lr)
 
+        def get_params(key):
+            return filter(
+                lambda p: p.requires_grad,
+                list(self.model.classifier[key].parameters())
+                + list(self.model.encoder_z1[key].parameters())
+                + list(self.model.encoder_z2_z1[key].parameters()),
+            )
+
+        encoder_keys = counts.loc[lambda x: x.index != "prior"].keys()
+        params_var = {key: get_params(key) for key in encoder_keys}
+        optim_vars = {key: Adam(params_var[key], lr=lr) for key in encoder_keys}
         for epoch in tqdm(range(n_epochs)):
             for (tensor_all, tensor_superv) in zip(
                 self.train_loader, cycle(self.train_annotated_loader)
@@ -300,41 +362,25 @@ class MnistTrainer:
                 optim_gen.zero_grad()
                 theta_loss.backward()
                 optim_gen.step()
-                # torch.cuda.synchronize()
 
-                if self.iterate % 100 == 0:
-                    self.metrics["train_theta_wake"].append(theta_loss.item())
+                # if self.iterate % 100 == 0:
+                #     self.metrics["train_theta_wake"].append(theta_loss.item())
 
-                psi_cubo_loss = self.loss(
-                    x_u=x_u,
-                    x_s=x_s,
-                    y_s=y_s,
-                    loss_type=cubo_wake_psi,
-                    n_samples=n_samples_phi,
-                    reparam=True,
-                    classification_ratio=classification_ratio,
-                    encoder_key="CUBO",
-                )
-                optim_cubo_var.zero_grad()
-                psi_cubo_loss.backward()
-                optim_cubo_var.step()
-                # torch.cuda.synchronize()
-
-                psi_eubo_loss = self.loss(
-                    x_u=x_u,
-                    x_s=x_s,
-                    y_s=y_s,
-                    loss_type=eubo_wake_psi,
-                    n_samples=n_samples_phi,
-                    reparam=False,
-                    classification_ratio=classification_ratio,
-                    encoder_key="EUBO",
-                )
-                optim_eubo_var.zero_grad()
-                psi_eubo_loss.backward()
-                optim_eubo_var.step()
-                # torch.cuda.synchronize()
-
+                for key in encoder_keys:
+                    do_reparam = reparams_info[key]
+                    var_loss = self.loss(
+                        x_u=x_u,
+                        x_s=x_s,
+                        y_s=y_s,
+                        loss_type=key,
+                        n_samples=n_samples_phi,
+                        reparam=do_reparam,
+                        classification_ratio=classification_ratio,
+                        encoder_key=key,
+                    )
+                    optim_vars[key].zero_grad()
+                    var_loss.backward()
+                    optim_vars[key].step()
             self.iterate += 1
 
     def loss(
@@ -350,13 +396,15 @@ class MnistTrainer:
         encoder_key="default",
         counts=None,
     ):
-
+        temp = self.temperature
         labelled_fraction = self.dataset.labelled_fraction
         s_every = int(1 / labelled_fraction)
 
         if mode == "all":
+            outs_s = None
             l_u = self.model.forward(
                 x_u,
+                temperature=temp,
                 loss_type=loss_type,
                 n_samples=n_samples,
                 reparam=reparam,
@@ -365,6 +413,7 @@ class MnistTrainer:
             )
             l_s = self.model.forward(
                 x_s,
+                temperature=temp,
                 loss_type=loss_type,
                 y=y_s,
                 n_samples=n_samples,
@@ -372,12 +421,15 @@ class MnistTrainer:
                 encoder_key=encoder_key,
                 counts=counts,
             )
+            # torch.cuda.synchronize()
             l_s = labelled_fraction * l_s
             j = l_u.mean() + l_s.mean()
         elif mode == "alternate":
+            outs_s = None
             if self.iterate % s_every == 0:
                 l_s = self.model.forward(
                     x_s,
+                    temperature=temp,
                     loss_type=loss_type,
                     y=y_s,
                     n_samples=n_samples,
@@ -389,6 +441,7 @@ class MnistTrainer:
             else:
                 l_u = self.model.forward(
                     x_u,
+                    temperature=temp,
                     loss_type=loss_type,
                     n_samples=n_samples,
                     reparam=reparam,
@@ -403,19 +456,27 @@ class MnistTrainer:
             # Classifiers' gradients are null wrt theta
             l_class = 0.0
         else:
-            y_pred = self.model.classify(x_s, encoder_key=encoder_key)
+            # y_pred = self.model.classify(
+            #     x_s,
+            #     encoder_key=encoder_key,
+            #     mode=self.classify_mode,
+            #     n_samples=n_samples,
+            # )
+            if self.classify_mode != "vanilla":
+                y_pred = self.model.classify(
+                    x_s,
+                    encoder_key=encoder_key,
+                    mode=self.classify_mode,
+                    n_samples=n_samples,
+                )
+            else:
+                y_pred = self.model.classify(x_s, encoder_key=encoder_key)
             l_class = self.cross_entropy_fn(y_pred, target=y_s)
         loss = j + classification_ratio * l_class
 
         if self.save_metrics:
             if self.iterate % 100 == 0:
                 self.metrics["classification_loss"].append(l_class.item())
-
-                other_metrics = self.inference(
-                    self.train_loader, keys=["CUBO"], n_samples=10
-                )
-                self.metrics["train_cubo"].append(other_metrics["CUBO"].mean())
-
         return loss
 
     @torch.no_grad()
@@ -440,21 +501,48 @@ class MnistTrainer:
             y = y.to("cuda")
             if not do_supervised:
                 res = self.model.inference(
-                    x, n_samples=n_samples, encoder_key=encoder_key, counts=counts
+                    x,
+                    n_samples=n_samples,
+                    encoder_key=encoder_key,
+                    counts=counts,
+                    temperature=0.5,
+                    reparam=False,
                 )
             else:
                 raise ValueError("Not sure")
                 res = self.model.inference(
-                    x, y=y, n_samples=n_samples, encoder_key=encoder_key, counts=counts
+                    x,
+                    y=y,
+                    n_samples=n_samples,
+                    encoder_key=encoder_key,
+                    counts=counts,
+                    temperature=0.5,
+                    reparam=False,
                 )
             res["y"] = y
             if keys is not None:
                 filtered_res = {key: val for (key, val) in res.items() if key in keys}
             else:
                 filtered_res = res
+            if "preds_is" in keys:
+                filtered_res["preds_is"] = self.model.classify(
+                    x,
+                    n_samples=n_samples,
+                    mode="is",
+                    counts=counts,
+                    encoder_key=encoder_key,
+                )
+            if "preds_plugin" in keys:
+                filtered_res["preds_plugin"] = self.model.classify(
+                    x,
+                    n_samples=n_samples,
+                    mode="plugin",
+                    counts=counts,
+                    encoder_key=encoder_key,
+                )
 
             is_labelled = False
-            if encoder_key != "defensive":
+            if counts is None:
                 log_ratios = (
                     res["log_pz2"]
                     + res["log_pc"]

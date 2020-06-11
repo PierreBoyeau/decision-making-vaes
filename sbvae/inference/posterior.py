@@ -14,7 +14,6 @@ from sklearn.metrics import normalized_mutual_info_score as NMI
 from sklearn.metrics import silhouette_score
 from sklearn.mixture import GaussianMixture as GMM
 from sklearn.neighbors import KNeighborsRegressor, NearestNeighbors
-from sklearn.utils.linear_assignment_ import linear_assignment
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import (
     RandomSampler,
@@ -22,7 +21,7 @@ from torch.utils.data.sampler import (
     SubsetRandomSampler,
 )
 
-from sbvae.inference.semi_supervised_trainer import dic_concat, dic_update
+from sbvae.inference.semi_supervised_trainer_relaxed import dic_concat, dic_update
 from sbvae.models.log_likelihood import (
     compute_log_likelihood,
     compute_marginal_log_likelihood,
@@ -137,9 +136,11 @@ class Posterior:
         do_observed_library=False,
         encoder_key="default",
         counts=None,
+        z_encoder=None,
     ):
         all_res = dict()
-        for tensors in self:
+        print("z_encoder None:", z_encoder is None)
+        for tensors in self.update({"batch_size": batch_size}):
             sample_batch, local_l_mean, local_l_var, batch_index, label = tensors
             res = self.model(
                 sample_batch,
@@ -151,6 +152,7 @@ class Posterior:
                 do_observed_library=do_observed_library,
                 encoder_key=encoder_key,
                 counts=counts,
+                z_encoder=z_encoder,
             )
             res["label"] = label
             if keys is not None:
@@ -981,23 +983,6 @@ def nn_overlap(X1, X2, k=100):
         / (float(len(set_1)) * len(set_2))
     )
     return spearman_correlation, fold_enrichment
-
-
-def unsupervised_clustering_accuracy(y, y_pred):
-    """
-    Unsupervised Clustering Accuracy
-    """
-    assert len(y_pred) == len(y)
-    u = np.unique(np.concatenate((y, y_pred)))
-    n_clusters = len(u)
-    mapping = dict(zip(u, range(n_clusters)))
-    reward_matrix = np.zeros((n_clusters, n_clusters), dtype=np.int64)
-    for y_pred_, y_ in zip(y_pred, y):
-        if y_ in mapping:
-            reward_matrix[mapping[y_pred_], mapping[y_]] += 1
-    cost_matrix = reward_matrix.max() - reward_matrix
-    ind = linear_assignment(cost_matrix)
-    return sum([reward_matrix[i, j] for i, j in ind]) * 1.0 / y_pred.size, ind
 
 
 def knn_purity(latent, label, n_neighbors=30):
