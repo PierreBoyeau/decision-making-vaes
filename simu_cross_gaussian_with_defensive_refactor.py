@@ -12,7 +12,8 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from ax import optimize
+
+# from ax import optimize
 from tqdm.auto import tqdm
 
 from sbvae.dataset import SyntheticGaussianDataset
