@@ -78,7 +78,15 @@ print("train labelled examples", len(DATASET.train_dataset_labelled.tensors[0]))
 
 EVAL_ENCODERS = [
     dict(encoder_type="train", eval_encoder_name="train"),  # MUST BE ON TOP!!!
-    dict(encoder_type="ELBO", reparam=True, eval_encoder_name="ELBO"),
+    dict(encoder_type="ELBO", reparam=True, eval_encoder_name="VAE"),
+    dict(encoder_type="IWELBO", reparam=True, eval_encoder_name="IWAE"),
+    dict(encoder_type="REVKL", reparam=False, eval_encoder_name="WW"),
+    dict(
+        encoder_type="CUBO",
+        reparam=True,
+        eval_encoder_name="$\\chi$",
+        vdist_map=dict(default="student"),
+    ),
     dict(
         encoder_type=["IWELBO", "CUBO", "REVKL"],
         reparam=None,
@@ -92,14 +100,6 @@ EVAL_ENCODERS = [
             )
         ),
     ),
-    dict(encoder_type="IWELBO", reparam=True, eval_encoder_name="IWELBO"),
-    dict(
-        encoder_type="CUBO",
-        reparam=True,
-        eval_encoder_name="$\\chi$",
-        vdist_map=dict(default="student"),
-    ),
-    dict(encoder_type="REVKL", reparam=False, eval_encoder_name="WW"),
 ]
 
 SCENARIOS = [  # WAKE updates

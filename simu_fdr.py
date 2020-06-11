@@ -766,8 +766,8 @@ EVAL_ENCODERS = [
         eval_encoder_name="$\\chi$",
     ),
     dict(encoder_type="ELBO", reparam=True, eval_encoder_name="VAE"),
-    dict(encoder_type="REVKL", reparam=False, eval_encoder_name="WW"),
     dict(encoder_type="IWELBO", reparam=True, eval_encoder_name="IWAE"),
+    dict(encoder_type="REVKL", reparam=False, eval_encoder_name="WW"),
     dict(encoder_type="defensive", reparam=True, eval_encoder_name="Mixt."),
 ]
 

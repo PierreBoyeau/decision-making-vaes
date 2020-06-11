@@ -51,7 +51,7 @@ def softmax(x):
 EVAL_ENCODERS = [
     dict(encoder_type="train", eval_encoder_name="train"),
     # # # Variational distribution used to train the gen model
-    dict(encoder_type=["ELBO"], reparam=True, eval_encoder_name="ELBO"),
+    dict(encoder_type=["ELBO"], reparam=True, eval_encoder_name="VAE"),
     dict(encoder_type=["IWELBO"], reparam=True, eval_encoder_name="IWAE"),
     dict(encoder_type=["REVKL"], reparam=True, eval_encoder_name="Forward KL"),
     dict(encoder_type=["CUBO"], reparam=True, eval_encoder_name="$\\chi$"),
@@ -60,25 +60,6 @@ EVAL_ENCODERS = [
         reparam=True,
         eval_encoder_name="$\\chi$ (St)",
         student_encs=["CUBO"],
-    ),
-    dict(
-        encoder_type=["IWELBO"],
-        reparam=True,
-        eval_encoder_name="IWAE (St)",
-        student_encs=["IWELBO"],
-    ),
-    dict(
-        encoder_type=["IWELBO", "CUBO", "REVKL"],
-        counts_eval=pd.Series(
-            dict(
-                IWELBO=N_SAMPLES_THETA // 4,
-                CUBO=N_SAMPLES_THETA // 4,
-                REVKL=N_SAMPLES_THETA // 4,
-                prior=N_SAMPLES_THETA // 4,
-            )
-        ),
-        reparam=True,
-        eval_encoder_name="MsbVAEB",
     ),
     dict(
         encoder_type=["IWELBO", "CUBO", "REVKL"],
@@ -96,23 +77,15 @@ EVAL_ENCODERS = [
     ),
 ]
 scenarios = [  # WAKE updates
-    dict(learn_var=True, loss_gen="IWELBO", losses_wvar=["CUBO"], model_name="$\\chi$"),
-    dict(learn_var=True, loss_gen="IWELBO", losses_wvar=["IWELBO"], model_name="IWAE"),
     dict(learn_var=True, loss_gen="ELBO", losses_wvar=["ELBO"], model_name="VAE"),
+    dict(learn_var=True, loss_gen="IWELBO", losses_wvar=["IWELBO"], model_name="IWAE"),
     dict(learn_var=True, loss_gen="IWELBO", losses_wvar=["REVKL"], model_name="WW"),
+    dict(learn_var=True, loss_gen="IWELBO", losses_wvar=["CUBO"], model_name="$\\chi$"),
     dict(
         learn_var=True,
         loss_gen="IWELBO",
         losses_wvar=["CUBO"],
         model_name="$\\chi$ (St)",
-        do_student=True,
-        student_df="learn",
-    ),
-    dict(
-        learn_var=True,
-        loss_gen="IWELBO",
-        losses_wvar=["IWELBO"],
-        model_name="IWAE (St)",
         do_student=True,
         student_df="learn",
     ),
