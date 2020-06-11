@@ -89,7 +89,7 @@ def res_eval_loop(
     with torch.no_grad():
         # Below function integrates both inference methods for
         # mixture and simple statistics
-        train_res = trainer.mechanicalkeyboards.com(
+        train_res = trainer.inference(
             trainer.test_loader,
             # trainer.train_loader,
             keys=[
