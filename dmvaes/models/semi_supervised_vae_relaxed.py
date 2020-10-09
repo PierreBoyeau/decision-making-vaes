@@ -11,7 +11,7 @@ from torch.distributions import (
     OneHotCategorical,
 )
 
-from sbvae.models.regular_modules import (
+from dmvaes.models.regular_modules import (
     BernoulliDecoderA,
     ClassifierA,
     DecoderA,

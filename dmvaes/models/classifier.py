@@ -1,6 +1,6 @@
 from torch import nn as nn
 
-from sbvae.models.modules import FCLayers
+from dmvaes.models.modules import FCLayers
 
 
 class Classifier(nn.Module):

@@ -10,8 +10,8 @@ import torch.distributions as db
 from torch import nn
 from arviz.stats import psislw
 
-from sbvae.ais import ais_trajectory
-from sbvae.dataset import GeneExpressionDataset
+from dmvaes.ais import ais_trajectory
+from dmvaes.dataset import GeneExpressionDataset
 
 
 NUMS = 5

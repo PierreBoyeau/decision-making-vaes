@@ -1,12 +1,12 @@
-# sbVAE
+# decision-making-vaes
 
 ## Install package
 
 1. Install python 3.7 along with pytorch.
 
-1. Install `sbVAE`
+1. Install `dmvaes`
 
 ```bash
-cd sbVAE
+cd decision-making-vaes
 python setup.py install
 ```

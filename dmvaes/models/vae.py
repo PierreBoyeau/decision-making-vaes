@@ -11,9 +11,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Gamma, Normal, Poisson
 
-from sbvae.models.log_likelihood import log_nb_positive, log_zinb_positive
-from sbvae.models.modules import DecoderSCVI, Encoder, EncoderIAF, EncoderStudent
-from sbvae.models.utils import one_hot
+from dmvaes.models.log_likelihood import log_nb_positive, log_zinb_positive
+from dmvaes.models.modules import DecoderSCVI, Encoder, EncoderIAF, EncoderStudent
+from dmvaes.models.utils import one_hot
 
 logger = logging.getLogger(__name__)
 

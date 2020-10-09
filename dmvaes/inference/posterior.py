@@ -21,8 +21,8 @@ from torch.utils.data.sampler import (
     SubsetRandomSampler,
 )
 
-from sbvae.inference.semi_supervised_trainer_relaxed import dic_concat, dic_update
-from sbvae.models.log_likelihood import (
+from dmvaes.inference.semi_supervised_trainer_relaxed import dic_concat, dic_update
+from dmvaes.models.log_likelihood import (
     compute_log_likelihood,
     compute_marginal_log_likelihood,
 )

@@ -8,8 +8,8 @@ import torch.distributions as dist
 from torch import nn as nn
 from torch.distributions import Normal
 
-from sbvae.models.utils import one_hot
-from sbvae.models.distributions import EllipticalStudent
+from dmvaes.models.utils import one_hot
+from dmvaes.models.distributions import EllipticalStudent
 
 logger = logging.getLogger(__name__)
 
