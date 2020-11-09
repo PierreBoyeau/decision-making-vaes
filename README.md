@@ -14,6 +14,14 @@ Manuscript: https://arxiv.org/abs/2002.07217
 2. Install the package
 
 ```bash
-cd sbVAE
+cd decision-making-vaes
 python setup.py install
 ```
+
+## Run experiments
+
+- To run the pPCA experiment, run `python simu_ppca.py`
+
+- To run the MNIST experiment, run `python simu_mnist.py`
+
+- To run the FDR experiment, run `python simu_fdr.py`

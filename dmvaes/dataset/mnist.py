@@ -4,7 +4,7 @@ from torchvision.datasets import MNIST
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset
 
-mnist_data = MNIST(root="sbvae_data/mnist", download=True)
+mnist_data = MNIST(root="dmvaes_data/mnist", download=True)
 X = mnist_data.data
 labels = mnist_data.targets
 

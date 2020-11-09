@@ -7,7 +7,7 @@ import logging
 from math import ceil
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import numpy as np
 import pandas as pd
@@ -17,10 +17,10 @@ from arviz.stats import psislw
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 from tqdm.auto import tqdm
 
-from sbvae.dataset import MnistDataset
-from sbvae.inference import MnistRTrainer
-from sbvae.models import RelaxedSVAE
-from sbvae.models.regular_modules import (
+from dmvaes.dataset import MnistDataset
+from dmvaes.inference import MnistRTrainer
+from dmvaes.models import RelaxedSVAE
+from dmvaes.models.regular_modules import (
     EncoderA,
     EncoderB,
     ClassifierA,
@@ -64,9 +64,9 @@ DEFAULT_MAP = dict(
 Z1_MAP = dict(gaussian=EncoderB, student=EncoderBStudent,)
 Z2_MAP = dict(gaussian=EncoderA, student=EncoderAStudent,)
 
-PROJECT_NAME = "mnist-relaxed1"
+PROJECT_NAME = "mnist-relaxed_nparticules_{}".format(N_PARTICULES)
 FILENAME = "{}.pkl".format(PROJECT_NAME)
-MDL_DIR = "models/{}E".format(PROJECT_NAME)
+MDL_DIR = "models/{}".format(PROJECT_NAME)
 DEBUG = False
 
 if not os.path.exists(MDL_DIR):

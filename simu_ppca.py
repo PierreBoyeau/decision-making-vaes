@@ -16,10 +16,10 @@ import torch.nn as nn
 # from ax import optimize
 from tqdm.auto import tqdm
 
-from sbvae.dataset import SyntheticGaussianDataset
-from sbvae.inference import GaussianDefensiveTrainer
-from sbvae.models import LinearGaussianDefensive
-from sbvae.models.modules import Encoder, EncoderStudent
+from dmvaes.dataset import SyntheticGaussianDataset
+from dmvaes.inference import GaussianDefensiveTrainer
+from dmvaes.models import LinearGaussianDefensive
+from dmvaes.models.modules import Encoder, EncoderStudent
 from simu_gaussian_utils import model_evaluation_loop, DATASET, DIM_Z, DIM_X
 
 
@@ -28,15 +28,18 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.FileHandler("debug.log"), logging.StreamHandler()],
 )
-FILENAME = "ppca-def351_100_100_full_with_students_no_land_k5_defensive"
+
+N_PARTICULES = 5
+N_SAMPLES_PHI = N_PARTICULES
+N_SAMPLES_THETA = N_PARTICULES
+FILENAME = "ppca-def351_100_100_k{}_annealing_gens".format(N_PARTICULES)
+
 
 # FILENAME = "deleteme"
 n_simu = 5
 n_epochs = 100
 LINEAR_ENCODER = False
 MULTIMODAL_VAR_LANDSCAPE = False
-N_SAMPLES_PHI = 5
-N_SAMPLES_THETA = 5
 LR = 1e-2
 
 
@@ -56,12 +59,6 @@ EVAL_ENCODERS = [
     dict(encoder_type=["REVKL"], reparam=True, eval_encoder_name="Forward KL"),
     dict(encoder_type=["CUBO"], reparam=True, eval_encoder_name="$\\chi$"),
     dict(
-        encoder_type=["CUBO"],
-        reparam=True,
-        eval_encoder_name="$\\chi$ (St)",
-        student_encs=["CUBO"],
-    ),
-    dict(
         encoder_type=["IWELBO", "CUBO", "REVKL"],
         counts_eval=pd.Series(
             dict(
@@ -72,7 +69,7 @@ EVAL_ENCODERS = [
             )
         ),
         reparam=True,
-        eval_encoder_name="MsbVAEB",
+        eval_encoder_name="MIS",
         student_encs=["CUBO"],
     ),
 ]

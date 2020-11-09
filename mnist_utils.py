@@ -7,7 +7,7 @@ from arviz.stats import psislw
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 from tqdm.auto import tqdm
 
-from sbvae.dataset import MnistDataset
+from dmvaes.dataset import MnistDataset
 
 
 N_EVAL_SAMPLES = 25
@@ -28,7 +28,7 @@ BATCH_SIZE = 512
 DATASET = MnistDataset(
     labelled_fraction=LABELLED_FRACTION,
     labelled_proportions=LABELLED_PROPORTIONS,
-    root="sbvae_data/mnist",
+    root="dmvaes_data/mnist",
     download=True,
     do_1d=True,
     test_size=0.5,

@@ -10,8 +10,8 @@ import torch.nn as nn
 from scipy.linalg import sqrtm
 from torch.distributions import MultivariateNormal, Normal
 
-from sbvae.models.modules import Encoder, EncoderStudent
-from sbvae.models.regular_modules import LinearEncoder
+from dmvaes.models.modules import Encoder, EncoderStudent
+from dmvaes.models.regular_modules import LinearEncoder
 
 torch.backends.cudnn.benchmark = True
 

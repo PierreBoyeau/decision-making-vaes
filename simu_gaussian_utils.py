@@ -3,7 +3,7 @@ from scipy.linalg import sqrtm
 from arviz.stats import psislw
 from scipy.stats import norm
 
-from sbvae.dataset import SyntheticGaussianDataset
+from dmvaes.dataset import SyntheticGaussianDataset
 
 
 nus = np.geomspace(1e-2, 1e1, num=40)
@@ -67,7 +67,7 @@ def model_evaluation_loop(
     if seq_var[0] is not None:
         for it in range(len(seq_var)):
             seq_var_item = seq_var[it]  # Posterior variance
-            d_inv = np.diag(1.0 / seq_var_item)  # Variationnal posterior precision
+            d_inv = np.diag(1.0 / seq_var_item)  # Variational posterior precision
             a = sigma_sqrt @ (d_inv @ sigma_sqrt) - np.eye(DIM_Z)
             a_2_it[it] = np.linalg.norm(a, ord=2)
     a_2_it = a_2_it.mean()

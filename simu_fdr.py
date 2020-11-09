@@ -16,14 +16,13 @@ import torch.distributions as db
 from torch import nn
 from arviz.stats import psislw
 
-from sbvae.ais import ais_trajectory
-from sbvae.dataset import GeneExpressionDataset
+from dmvaes.ais import ais_trajectory
+from dmvaes.dataset import GeneExpressionDataset
 
 
 NUMS = 5
 N_PICKS = 30
 N_CELLS = 5
-SEEDS = np.arange(500)
 # option 3
 n_genes = 100
 DO_POISSON = True
@@ -50,8 +49,8 @@ class SignedGamma:
         return signs * gammas
 
 
-torch.manual_seed(42)
-np.random.seed(42)
+torch.manual_seed(1)
+np.random.seed(1)
 
 means = 10 + 50 * torch.rand(n_genes)
 means = means.numpy()
@@ -723,27 +722,22 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from sbvae.inference import UnsupervisedTrainer
-from sbvae.models import VAE
-from sbvae.models.modules import Encoder, EncoderIAF, EncoderStudent
+from dmvaes.inference import UnsupervisedTrainer
+from dmvaes.models import VAE
+from dmvaes.models.modules import Encoder, EncoderIAF, EncoderStudent
 
-FILENAME = "symsim-refactor_logpoisson_med_small_d1"
 
 # FILENAME = "symsim-refactor_dbug"
 COUNTS_EVAL = pd.Series(dict(IWELBO=50, CUBO=50, REVKL=50, prior=50,))
 
-MODEL_DIR = "models/{}".format(FILENAME)
 DO_OBSERVED_LIBRARY = True
 SCHEDULE_N = 50
 N_IWSAMPLES = 500
 
-if not os.path.exists(MODEL_DIR):
-    os.makedirs(MODEL_DIR)
-
 # Training parameters
 N_EPOCHS = 100  # High number of epochs sounds vital to reach acceptable levels of khat
 LR = 1e-3
-N_PARTICULES = 5
+N_PARTICULES = 30
 TRAIN_SIZE = 0.8
 BATCH_SIZE = 128
 N_HIDDEN = 128
@@ -751,8 +745,12 @@ N_CELLS = 100
 N_LATENT = 10
 
 N_PICKS = 1
-N_EXPERIMENTS = 15
+N_EXPERIMENTS = 5
 DO_BATCH_NORM = False
+FILENAME = "symsim-refactor_logpoisson_{}_particules".format(N_PARTICULES)
+MODEL_DIR = "models/{}".format(FILENAME)
+if not os.path.exists(MODEL_DIR):
+    os.makedirs(MODEL_DIR)
 
 
 EVAL_ENCODERS = [
