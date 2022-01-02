@@ -116,7 +116,7 @@ class Posterior:
         return map(self.to_cuda, iter(self.data_loader))
 
     def to_cuda(self, tensors):
-        return [t.cuda() if self.use_cuda else t for t in tensors]
+        return [t.to(device) if self.use_cuda else t for t in tensors]
 
     def update(self, data_loader_kwargs):
         posterior = copy.copy(self)

@@ -12,6 +12,7 @@ from torch.distributions import MultivariateNormal, Normal
 
 from dmvaes.models.modules import Encoder, EncoderStudent
 from dmvaes.models.regular_modules import LinearEncoder
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 torch.backends.cudnn.benchmark = True
 
@@ -92,31 +93,31 @@ class LinearGaussianDefensive(nn.Module):
         if learn_gen:
             self.A = nn.Parameter(torch.randn(*A_param.shape), requires_grad=True)
         else:
-            self.A = torch.from_numpy(np.array(A_param, dtype=np.float32)).cuda()
-        self.A_gt = torch.from_numpy(np.array(A_param, dtype=np.float32)).cuda()
+            self.A = torch.from_numpy(np.array(A_param, dtype=np.float32)).to(device)
+        self.A_gt = torch.from_numpy(np.array(A_param, dtype=np.float32)).to(device)
 
         # used in case learn_var=False
         self.log_det_pxz = torch.tensor(
             pxz_log_det, requires_grad=False, dtype=torch.float
-        ).cuda()
+        ).to(device)
         self.inv_sqrt_pxz = torch.from_numpy(
             np.array(pxz_inv_sqrt, dtype=np.float32)
-        ).cuda()
+        ).to(device)
 
         self.learn_var = learn_var
         self.multimodal_var_landscape = multimodal_var_landscape
         self._px_log_diag_var = torch.nn.Parameter(torch.randn(1, n_input))
 
-        self.gamma = torch.from_numpy(np.array(np.diag(gamma), dtype=np.float32)).cuda()
+        self.gamma = torch.from_numpy(np.array(np.diag(gamma), dtype=np.float32)).to(device)
 
         log_det = np.log(np.linalg.det(gamma))
         self.log_det_px_z = torch.tensor(
             log_det, requires_grad=False, dtype=torch.float
-        ).cuda()
+        ).to(device)
         inv_sqrt = sqrtm(np.linalg.inv(gamma))
         self.inv_sqrt_px_z = torch.from_numpy(
             np.array(inv_sqrt, dtype=np.float32)
-        ).cuda()
+        ).to(device)
 
     @property
     def px_log_diag_var(self):
@@ -330,7 +331,7 @@ class LinearGaussianDefensive(nn.Module):
         """
         n_latent = z.shape[-1]
         z_prior = Normal(
-            torch.zeros(n_latent, device="cuda"), torch.ones(n_latent, device="cuda")
+            torch.zeros(n_latent, device=device), torch.ones(n_latent, device=device)
         )
         log_pz = z_prior.log_prob(z).sum(-1)
 
@@ -534,7 +535,7 @@ class LinearGaussianDefensive(nn.Module):
 
     def generate_prior_data(self):
         shape_z = (128, self.n_latent)
-        z = Normal(torch.zeros(shape_z).cuda(), torch.ones(shape_z).cuda()).sample()
+        z = Normal(torch.zeros(shape_z).to(device), torch.ones(shape_z).to(device)).sample()
         px_mean = torch.matmul(z, torch.transpose(self.A, 0, 1))
         if self.learn_var:
             px_var = torch.exp(self.px_log_diag_var)
@@ -619,7 +620,7 @@ class LinearGaussianDefensive(nn.Module):
         # copying code from NUMPY
         d = x.shape[1]
 
-        log_lik = torch.zeros((x.shape[0],), dtype=torch.float).cuda()
+        log_lik = torch.zeros((x.shape[0],), dtype=torch.float).to(device)
         log_lik += d * np.log(2 * np.array(np.pi, dtype=np.float32))
         log_lik += log_det
         vec_ = torch.matmul(x - mean, inv_sqrt)

@@ -21,6 +21,7 @@ from dmvaes.inference import GaussianDefensiveTrainer
 from dmvaes.models import LinearGaussianDefensive
 from dmvaes.models.modules import Encoder, EncoderStudent
 from simu_gaussian_utils import model_evaluation_loop, DATASET, DIM_Z, DIM_X
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 logging.basicConfig(
@@ -211,7 +212,7 @@ for dic in scenarios:
                             n_layers=1,
                             n_hidden=N_HIDDEN,
                             dropout_rate=0.1,
-                        ).cuda()
+                        ).to(device)
                     else:
                         modules[enc_key] = Encoder(
                             n_input=DIM_X,
@@ -219,7 +220,7 @@ for dic in scenarios:
                             n_layers=1,
                             n_hidden=N_HIDDEN,
                             dropout_rate=0.1,
-                        ).cuda()
+                        ).to(device)
                 eval_encoder = nn.ModuleDict(modules)
                 params_wvar_eval = {
                     key: filter(

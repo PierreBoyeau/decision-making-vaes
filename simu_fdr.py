@@ -29,6 +29,8 @@ DO_POISSON = True
 
 import torch.distributions as distributions
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 class SignedGamma:
     def __init__(self, dim, proba_pos=0.75, shape=2, rate=4):
@@ -118,9 +120,9 @@ DATASET = GeneExpressionDataset(
 
 SAMPLE_IDX = np.random.choice(N_CELLS, 64)
 Y = labels
-X_U = torch.tensor(DATASET.X[SAMPLE_IDX]).to("cuda")
-LOCAL_L_MEAN = torch.tensor(DATASET.local_vars[SAMPLE_IDX]).to("cuda")
-LOCAL_L_VAR = torch.tensor(DATASET.local_means[SAMPLE_IDX]).to("cuda")
+X_U = torch.tensor(DATASET.X[SAMPLE_IDX]).to(device)
+LOCAL_L_MEAN = torch.tensor(DATASET.local_vars[SAMPLE_IDX]).to(device)
+LOCAL_L_VAR = torch.tensor(DATASET.local_means[SAMPLE_IDX]).to(device)
 N_GENES = n_genes
 
 
@@ -248,8 +250,8 @@ def get_predictions_ais(post_a, post_b, model, schedule, n_latent, n_post_sample
         log_h_a = (
             model.decoder(
                 model.dispersion,
-                z_a.cuda(),
-                torch.ones(len(z_a), n_batch, 1, device="cuda"),
+                z_a.to(device),
+                torch.ones(len(z_a), n_batch, 1, device=device),
                 None,
             )[0]
             .log2()
@@ -272,8 +274,8 @@ def get_predictions_ais(post_a, post_b, model, schedule, n_latent, n_post_sample
         log_h_b = (
             model.decoder(
                 model.dispersion,
-                z_b.cuda(),
-                torch.ones(len(z_b), n_batch, 1, device="cuda"),
+                z_b.to(device),
+                torch.ones(len(z_b), n_batch, 1, device=device),
                 None,
             )[0]
             .log2()
@@ -869,7 +871,7 @@ for scenario in SCENARIOS:
         if os.path.exists(mdl_name):
             print("model exists; loading from .pt")
             mdl.load_state_dict(torch.load(mdl_name))
-        mdl.cuda()
+        mdl.to(device)
         trainer = UnsupervisedTrainer(
             model=mdl,
             gene_dataset=DATASET,
@@ -988,12 +990,12 @@ for scenario in SCENARIOS:
                             REVKL=Encoder(**hparams),
                             CUBO=EncoderStudent(df="learn", **hparams),
                         )
-                        eval_encoder = nn.ModuleDict(encs).to("cuda")
+                        eval_encoder = nn.ModuleDict(encs).to(device)
                         counts_eval = COUNTS_EVAL
                         if os.path.exists(eval_enc_name):
                             print("eval enc mdl exists; loading from .pt")
                             eval_encoder.load_state_dict(torch.load(eval_enc_name))
-                            eval_encoder.cuda()
+                            eval_encoder.to(device)
                         else:
                             trainer.train_eval_defensive_encoder(
                                 eval_encoder,
@@ -1024,7 +1026,7 @@ for scenario in SCENARIOS:
                                         do_h=True,
                                     )
                                 }
-                            ).to("cuda")
+                            ).to(device)
 
                         elif encoder_variant == "student":
                             eval_encoder = nn.ModuleDict(
@@ -1039,7 +1041,7 @@ for scenario in SCENARIOS:
                                         dropout_rate=0.1,
                                     )
                                 }
-                            ).to("cuda")
+                            ).to(device)
 
                         else:
                             eval_encoder = nn.ModuleDict(
@@ -1053,13 +1055,13 @@ for scenario in SCENARIOS:
                                         dropout_rate=0.1,
                                     )
                                 }
-                            ).to("cuda")
+                            ).to(device)
 
                         counts_eval = None
                         if os.path.exists(eval_enc_name):
                             print("eval enc mdl exists; loading from .pt")
                             eval_encoder.load_state_dict(torch.load(eval_enc_name))
-                            eval_encoder.cuda()
+                            eval_encoder.to(device)
                         else:
                             trainer.train_eval_encoder(
                                 eval_encoder,
