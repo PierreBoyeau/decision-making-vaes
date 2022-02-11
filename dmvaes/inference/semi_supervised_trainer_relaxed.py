@@ -13,6 +13,7 @@ from tqdm.auto import tqdm
 from dmvaes.dataset import MnistDataset
 
 logger = logging.getLogger(__name__)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class MnistRTrainer:
@@ -136,9 +137,9 @@ class MnistRTrainer:
                 x_u, _ = tensor_all
                 x_s, y_s = tensor_superv
 
-                x_u = x_u.to("cuda")
-                x_s = x_s.to("cuda")
-                y_s = y_s.to("cuda")
+                x_u = x_u.to(device)
+                x_s = x_s.to(device)
+                y_s = y_s.to(device)
 
                 if overall_loss is not None:
                     loss = self.loss(
@@ -272,9 +273,9 @@ class MnistRTrainer:
                 x_u, _ = tensor_all
                 x_s, y_s = tensor_superv
 
-                x_u = x_u.to("cuda")
-                x_s = x_s.to("cuda")
-                y_s = y_s.to("cuda")
+                x_u = x_u.to(device)
+                x_s = x_s.to(device)
+                y_s = y_s.to(device)
 
                 # Wake phi
                 for key in encoder_keys:
@@ -343,9 +344,9 @@ class MnistRTrainer:
                 x_u, _ = tensor_all
                 x_s, y_s = tensor_superv
 
-                x_u = x_u.to("cuda")
-                x_s = x_s.to("cuda")
-                y_s = y_s.to("cuda")
+                x_u = x_u.to(device)
+                x_s = x_s.to(device)
+                y_s = y_s.to(device)
 
                 # Wake theta
                 theta_loss = self.loss(
@@ -497,8 +498,8 @@ class MnistRTrainer:
             self.model = self.model.train()
         for tensor_all in data_loader:
             x, y = tensor_all
-            x = x.to("cuda")
-            y = y.to("cuda")
+            x = x.to(device)
+            y = y.to(device)
             if not do_supervised:
                 res = self.model.inference(
                     x,

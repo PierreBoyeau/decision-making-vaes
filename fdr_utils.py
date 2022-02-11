@@ -12,6 +12,7 @@ from arviz.stats import psislw
 
 from dmvaes.ais import ais_trajectory
 from dmvaes.dataset import GeneExpressionDataset
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 NUMS = 5
@@ -113,9 +114,9 @@ DATASET = GeneExpressionDataset(
 
 SAMPLE_IDX = np.random.choice(N_CELLS, 64)
 Y = labels
-X_U = torch.tensor(DATASET.X[SAMPLE_IDX]).to("cuda")
-LOCAL_L_MEAN = torch.tensor(DATASET.local_vars[SAMPLE_IDX]).to("cuda")
-LOCAL_L_VAR = torch.tensor(DATASET.local_means[SAMPLE_IDX]).to("cuda")
+X_U = torch.tensor(DATASET.X[SAMPLE_IDX]).to(device)
+LOCAL_L_MEAN = torch.tensor(DATASET.local_vars[SAMPLE_IDX]).to(device)
+LOCAL_L_VAR = torch.tensor(DATASET.local_means[SAMPLE_IDX]).to(device)
 N_GENES = n_genes
 
 
@@ -243,8 +244,8 @@ def get_predictions_ais(post_a, post_b, model, schedule, n_latent, n_post_sample
         log_h_a = (
             model.decoder(
                 model.dispersion,
-                z_a.cuda(),
-                torch.ones(len(z_a), n_batch, 1, device="cuda"),
+                z_a.to(device),
+                torch.ones(len(z_a), n_batch, 1, device=device),
                 None,
             )[0]
             .log2()
@@ -267,8 +268,8 @@ def get_predictions_ais(post_a, post_b, model, schedule, n_latent, n_post_sample
         log_h_b = (
             model.decoder(
                 model.dispersion,
-                z_b.cuda(),
-                torch.ones(len(z_b), n_batch, 1, device="cuda"),
+                z_b.to(device),
+                torch.ones(len(z_b), n_batch, 1, device=device),
                 None,
             )[0]
             .log2()

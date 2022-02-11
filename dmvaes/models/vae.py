@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 torch.backends.cudnn.benchmark = True
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # VAE model
@@ -84,8 +85,8 @@ class VAE(nn.Module):
         self.n_latent_layers = 1  # not sure what this is for, no usages?
         self.multi_encoder_keys = multi_encoder_keys
         do_multi_encoders = len(multi_encoder_keys) >= 2
-        z_prior_mean = torch.zeros(n_latent, device="cuda")
-        z_prior_std = torch.ones(n_latent, device="cuda")
+        z_prior_mean = torch.zeros(n_latent, device=device)
+        z_prior_std = torch.ones(n_latent, device=device)
         self.z_prior = Normal(z_prior_mean, z_prior_std)
 
         if self.dispersion == "gene":
@@ -199,7 +200,7 @@ class VAE(nn.Module):
     #         q_cubo = Normal(post_cubo["q_m"][0], post_cubo["q_v"][0].sqrt())
     #     else:
     #         # Specific handling of counts=0 required for latter concatenation
-    #         z_cubo = torch.tensor([], device="cuda")
+    #         z_cubo = torch.tensor([], device=device)
     #         q_cubo = None
 
     #     post_eubo = z_def_enc["EUBO"](
@@ -210,7 +211,7 @@ class VAE(nn.Module):
     #         q_eubo = Normal(post_eubo["q_m"][0], post_eubo["q_v"][0].sqrt())
     #     else:
     #         # Specific handling of counts=0 required for latter concatenation
-    #         z_eubo = torch.tensor([], device="cuda")
+    #         z_eubo = torch.tensor([], device=device)
     #         q_eubo = None
 
     #     z_prior = self.z_prior.sample((counts[2], n_batch))
@@ -473,7 +474,7 @@ class VAE(nn.Module):
         :param x: used only for shape match
         """
         n_batches, _ = x.shape
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = device if torch.cuda.is_available() else "cpu"
         z_mean = torch.zeros(n_batches, self.n_latent, device=device)
         z_std = torch.zeros(n_batches, self.n_latent, device=device)
         z_prior_dist = Normal(z_mean, z_std)

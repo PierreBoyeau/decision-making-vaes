@@ -45,6 +45,7 @@ from mnist_utils import (
     DO_OVERALL,
     res_eval_loop,
 )
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 logging.basicConfig(level=logging.DEBUG)
 N_PARTICULES = 30
@@ -205,7 +206,7 @@ for scenario in SCENARIOS:
                 if os.path.exists(mdl_name):
                     print("model exists; loading from .pt")
                     mdl.load_state_dict(torch.load(mdl_name))
-                mdl.cuda()
+                mdl.to(device)
                 trainer = MnistRTrainer(
                     dataset=DATASET,
                     model=mdl,
@@ -303,7 +304,7 @@ for scenario in SCENARIOS:
                                 )
                                 for key in multi_encoder_keys_eval
                             }
-                        ).cuda()
+                        ).to(device)
                         new_encoder_z1 = nn.ModuleDict(
                             {
                                 # key: EncoderB(
@@ -316,7 +317,7 @@ for scenario in SCENARIOS:
                                 )
                                 for key in multi_encoder_keys_eval
                             }
-                        ).cuda()
+                        ).to(device)
                         new_encoder_z2_z1 = nn.ModuleDict(
                             {
                                 # key: EncoderA(
@@ -329,7 +330,7 @@ for scenario in SCENARIOS:
                                 )
                                 for key in multi_encoder_keys_eval
                             }
-                        ).cuda()
+                        ).to(device)
                         encoders = dict(
                             classifier=new_classifier,
                             encoder_z1=new_encoder_z1,

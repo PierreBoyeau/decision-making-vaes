@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.distributions as db
 from torch.distributions import constraints
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class EllipticalStudent(db.Distribution):
